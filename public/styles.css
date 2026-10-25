@@ -136,3 +136,10 @@ form input{width:100%}
 .alertform .pm[hidden],.alertform .tm[hidden]{display:none}
 .alertform input[name=percent]{width:72px}
 .alertform .aq{flex-basis:100%;line-height:1.5}
+/* find-a-card + graded prices */
+.badge.t{top:38px;color:#93c5fd}
+.chips.ex{align-items:center;color:var(--muted);font-size:13px;margin-top:12px}
+.chips.ex .chip{padding:3px 12px}
+.search #fBtn{margin-left:6px;flex:none}
+table.gt tr.hl td{background:#2a2410;color:var(--accent)}
+table.gt td:first-child{white-space:nowrap}

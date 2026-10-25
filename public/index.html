@@ -20,7 +20,7 @@
 </header>
 
 <main>
-  <nav class="modes" id="modes"><button data-m="cards" class="on">🃏 Cards by Pokémon</button><button data-m="sealed">📦 Sealed products</button></nav>
+  <nav class="modes" id="modes"><button data-m="cards" class="on">🃏 Cards by Pokémon</button><button data-m="find">🔎 Find a card</button><button data-m="sealed">📦 Sealed products</button></nav>
   <div id="cardsView">
   <section class="hero">
     <h1>Track any Pokémon's card prices</h1>
@@ -88,6 +88,25 @@
   </section>
   </div>
 
+  <div id="findView" hidden>
+    <section class="hero slim">
+      <h1>Find a specific card</h1>
+      <p class="sub">Type the card name plus its set and/or number. Covers Pokémon, trainers, items and energy — English &amp; Japanese instantly; press Enter to add Chinese cards.</p>
+      <div class="searchwrap"><div class="search"><span class="icon">⌕</span><input id="fq" type="search" placeholder="e.g. Charizard ex 199 · Umbreon VMAX Evolving Skies · 215/203" autocomplete="off" spellcheck="false" aria-label="Find a card"><button class="btn sm" id="fBtn" type="button">Search</button></div></div>
+      <div class="chips ex">Try: <button class="chip" data-example="Charizard ex 199">Charizard ex 199</button><button class="chip" data-example="Umbreon VMAX Evolving Skies">Umbreon VMAX Evolving Skies</button><button class="chip" data-example="215/203">215/203</button><button class="chip" data-example="Iono Paldea Evolved">Iono Paldea Evolved</button><button class="chip" data-example="Pikachu SV2a">Pikachu SV2a (JP)</button></div>
+      <div class="langs" id="fLangs">
+        <button data-l="en,ja,zh-tw,zh-cn" class="on">All languages</button>
+        <button data-l="en">🇺🇸 English</button>
+        <button data-l="ja">🇯🇵 Japanese</button>
+        <button data-l="zh-tw">繁體中文</button>
+        <button data-l="zh-cn">简体中文</button>
+      </div>
+    </section>
+    <div class="notes" id="fNotes"></div>
+    <div class="toolbar"><span class="muted small" id="fCount"></span><label class="small muted" style="margin-left:auto">Sort <select id="fSort"><option value="price" selected>Price: high → low</option><option value="match">Best match</option></select></label></div>
+    <div class="grid" id="fGrid"></div>
+  </div>
+
   <div id="sealedView" hidden>
     <section class="hero slim">
       <h1>Sealed product prices</h1>
@@ -126,7 +145,7 @@
 </main>
 
 <footer>
-  <div><b>Data sources.</b> Card &amp; sealed pack prices: TCGplayer via <a href="https://tcgcsv.com" target="_blank" rel="noopener">TCGCSV</a> (refreshed daily, USD). Cardmarket 1/7/30-day averages &amp; Chinese cards: <a href="https://tcgdex.dev" target="_blank" rel="noopener">TCGdex</a> (EUR). Pull rates: <a href="https://pullnomics.com/pull-rates" target="_blank" rel="noopener">Pullnomics</a> (English sets). Pokémon list &amp; sprites: <a href="https://pokeapi.co" target="_blank" rel="noopener">PokeAPI</a>.</div>
+  <div><b>Data sources.</b> Card &amp; sealed pack prices: TCGplayer via <a href="https://tcgcsv.com" target="_blank" rel="noopener">TCGCSV</a> (refreshed daily, USD). Cardmarket 1/7/30-day averages &amp; Chinese cards: <a href="https://tcgdex.dev" target="_blank" rel="noopener">TCGdex</a> (Cardmarket EUR, shown in USD at the daily ECB rate via <a href="https://frankfurter.dev" target="_blank" rel="noopener">Frankfurter</a>). Graded (PSA/BGS/CGC/SGC) prices &amp; population: <a href="https://cardprice.com" target="_blank" rel="noopener">CardPrice</a> (USD, cached 24h). Pull rates: <a href="https://pullnomics.com/pull-rates" target="_blank" rel="noopener">Pullnomics</a> (English sets). Pokémon list &amp; sprites: <a href="https://pokeapi.co" target="_blank" rel="noopener">PokeAPI</a>.</div>
   <div class="muted small">Not affiliated with Nintendo, The Pokémon Company, TCGplayer or Cardmarket. Prices are marketplace data, not offers.</div>
 </footer>
 

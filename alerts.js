@@ -36,6 +36,9 @@ function historyAverage(points) {
     : `site history, only ${n} day${n > 1 ? 's' : ''} (limited: fewer than ${MIN_HISTORY_DAYS})`;
   return { average, averageBasis, averageDays: n, averageLimited: n < MIN_HISTORY_DAYS, averageFrom: pts[0].d, averageTo: pts[n - 1].d };
 }
+// Cardmarket (tcgdex) alerts are evaluated in USD (EUR converted at the daily ECB rate). Alerts saved before that stored a
+// fixed target in EUR (currency 'EUR'); convert that target too so comparisons stay like-for-like.
+const usdAlert = (a, rate) => a.source === 'tcgdex' && a.currency === 'EUR' && a.target != null ? { ...a, target: r2(a.target * rate), currency: 'USD' } : a;
 // Decide whether an alert fires, given its current price and average info.
 function evaluate(a, current, avg) {
   const mode = alertMode(a), percent = mode === 'percent' ? alertPercent(a) : null;
@@ -75,6 +78,7 @@ async function checkAlerts(store, { markNotified = false, historyPoints = null, 
     if (!histMap) histMap = await storeHistoryLookup(store)(needHist).catch(e => { onError({ id: '-', name: 'price history' }, e); return new Map(); });
     return histMap.get(histKey(a)) || [];
   };
+  const fx = await L.eurUsd().catch(() => L.fxNow());
   const priceCache = new Map();
   const tcgcsvQuote = async a => {
     const k = `${a.category}:${a.groupId}`;
@@ -85,11 +89,12 @@ async function checkAlerts(store, { markNotified = false, historyPoints = null, 
   };
   const tcgdexQuote = async a => {
     const c = await L.tcgdexCard(a.language, a.tcgdexId);
-    const cm = c?.pricing?.cardmarket; return { current: cmCurrent(cm), avg: cmAverage(cm) };
+    const cm = L.cmUsd(c?.pricing?.cardmarket, fx.rate); return { current: cmCurrent(cm), avg: cmAverage(cm) };
   };
   const hits = [];
   const now = () => new Date().toISOString();
-  for (const a of alerts) {
+  for (const a0 of alerts) {
+    const a = usdAlert(a0, fx.rate);
     let q;
     try { q = a.source === 'tcgdex' ? await tcgdexQuote(a) : await tcgcsvQuote(a); }
     catch (e) { onError(a, e); continue; }
@@ -103,7 +108,8 @@ async function checkAlerts(store, { markNotified = false, historyPoints = null, 
           kind: a.kind, productType: productType(a), name: a.name, set: a.set, language: a.language, variant: a.subType || null,
           mode: ev.mode, currentPrice: current, average: avg.average, averageBasis: avg.averageBasis, averageDays: avg.averageDays, averageLimited: avg.averageLimited,
           percentOfAverage: ev.percentOfAverage, triggerPercent: ev.percent, triggerPrice: ev.triggerPrice, target: ev.triggerPrice,
-          currency: a.currency, priceField: a.priceField,
+          currency: a.source === 'tcgdex' ? 'USD' : a.currency,
+          priceField: a.source === 'tcgdex' ? `Cardmarket trend (avg if no trend) via TCGdex, converted from EUR at 1 EUR = $${fx.rate} (${fx.date || fx.source})` : a.priceField,
           link: a.url, image: a.img || null, pricesUpdated: a.source === 'tcgcsv' ? stamp : 'TCGdex/Cardmarket daily',
         });
         Object.assign(upd, { notified: true, notifiedAt: now(), notifiedPrice: current });
@@ -112,9 +118,9 @@ async function checkAlerts(store, { markNotified = false, historyPoints = null, 
     if (markNotified) {
       // Re-read so edits made on the site meanwhile aren't clobbered; skip if the alert was deleted or its rule changed.
       const fresh = await store.get('alerts', a.id);
-      if (fresh && alertMode(fresh) === ev.mode && fresh.target === a.target && fresh.percent === a.percent) await store.put('alerts', a.id, { ...fresh, ...upd });
+      if (fresh && alertMode(fresh) === ev.mode && fresh.target === a0.target && fresh.percent === a0.percent) await store.put('alerts', a.id, { ...fresh, ...upd });
     }
   }
   return hits;
 }
-module.exports = { checkAlerts, productType, alertMode, alertPercent, cmCurrent, cmAverage, historyAverage, evaluate, DEFAULT_PERCENT, AVG_DAYS, MIN_HISTORY_DAYS };
+module.exports = { checkAlerts, usdAlert, productType, alertMode, alertPercent, cmCurrent, cmAverage, historyAverage, evaluate, DEFAULT_PERCENT, AVG_DAYS, MIN_HISTORY_DAYS };

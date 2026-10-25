@@ -127,6 +127,7 @@ function sealedType(p) {
   return null;
 }
 
+const INDEX_V = 2; // v2: trainer/item/energy cards included (t:1)
 async function buildIndex(force = false) {
   if (state.loading) return; state.loading = true;
   const t0 = Date.now();
@@ -161,8 +162,10 @@ async function buildIndex(force = false) {
           for (const p of products) {
             if (!p.number) continue;
             g.tierCounts[p.rarity] = (g.tierCounts[p.rarity] || 0) + 1;
-            if (!(p.hp || p.stage)) continue; // Pokémon cards only
-            cards.push({ ...p, cat: g.cat, lang: g.lang, groupId: g.groupId, n: norm(p.name.replace(/\s-\s.*$/, '')), prices: priceMap.get(p.id) || [] });
+            // Every numbered card is indexed (Pokémon, trainers, items, energy); non-Pokémon get t:1 so the by-Pokémon view skips them.
+            const c = { ...p, cat: g.cat, lang: g.lang, groupId: g.groupId, n: norm(p.name.replace(/\s-\s.*$/, '')), prices: priceMap.get(p.id) || [] };
+            if (!(p.hp || p.stage)) c.t = 1;
+            cards.push(c);
           }
           // SWSH V / VMAX tier counts (regular, main-set numbered)
           const rates = PULL.sets[String(g.groupId)]?.rates || {};
@@ -184,9 +187,9 @@ async function buildIndex(force = false) {
       }
       if (best) packs.set(k, { ...packs.get(gkey(best.cat, best.groupId)), fromParent: best.name });
     }
-    applyIndex({ v: 1, stamp, indexedAt: new Date().toISOString(), groups, cards, sealed, packs: [...packs.entries()] });
+    applyIndex({ v: INDEX_V, stamp, indexedAt: new Date().toISOString(), groups, cards, sealed, packs: [...packs.entries()] });
     state.indexSource = 'built';
-    log(`Indexed ${cards.length} Pokémon cards (${cards.filter(c => c.lang === 'ja').length} Japanese), ${packs.size} sets with a pack price, ${sealed.length} sealed products in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    log(`Indexed ${cards.length} cards (${cards.filter(c => c.t).length} trainer/energy, ${cards.filter(c => c.lang === 'ja').length} Japanese), ${packs.size} sets with a pack price, ${sealed.length} sealed products in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
     // Persist: today's price snapshot (tracked products only), the index (for fast cold starts), the product cache.
     const tracked = new Set([...cards.map(c => c.id), ...sealed.map(x => x.id), ...[...packs.values()].map(p => p.id)]);
     const snap = {}; for (const [k, m] of Object.entries(snapshot)) if (tracked.has(+k.split('|')[0])) snap[k] = m;
@@ -200,7 +203,7 @@ async function buildIndex(force = false) {
     } catch (e) { log('saving index/history failed', e.message); }
   } finally { state.loading = false; productsCache = null; }
 }
-function indexSnapshot() { return { v: 1, stamp: state.lastUpdated, indexedAt: state.indexedAt, groups: state.groups, cards: state.cards, sealed: state.sealed, packs: [...state.packs.entries()] }; }
+function indexSnapshot() { return { v: INDEX_V, stamp: state.lastUpdated, indexedAt: state.indexedAt, groups: state.groups, cards: state.cards, sealed: state.sealed, packs: [...state.packs.entries()] }; }
 function applyIndex(s) {
   state.groups = s.groups; state.groupByKey = new Map(s.groups.map(g => [gkey(g.cat, g.groupId), g]));
   state.sealed = s.sealed; state.sealedById = new Map(s.sealed.map(x => [x.id, x]));
@@ -208,6 +211,8 @@ function applyIndex(s) {
   state.packById = new Map(s.packs.map(([k, p]) => [p.id, { ...p, groupKey: k }]));
   state.lastUpdated = s.stamp; state.indexedAt = s.indexedAt;
   state.progress = { done: s.groups.length, total: s.groups.length };
+  state.indexV = s.v || 1;
+  buildCardSearch();
 }
 
 // ---------- price history (self-recorded daily snapshots) ----------
@@ -271,17 +276,7 @@ const cmPrice = cm => cm ? (cm.trend || cm.avg || cm['trend-holo'] || cm['avg-ho
 async function chineseCards(lang, dexId) {
   const list = await tcgdexList(lang, dexId);
   const details = await pool(list.slice(0, 80), 6, x => L.tcgdexCard(lang, x.id));
-  return details.filter(Boolean).map(c => {
-    const cm = c.pricing?.cardmarket || null;
-    return {
-      id: `tcgdex:${lang}:${c.id}`, source: 'tcgdex', tcgdexId: c.id, lang, name: c.name, number: `${c.localId}${c.set?.cardCount?.official ? '/' + c.set.cardCount.official : ''}`,
-      rarity: c.rarity || null, img: c.image ? `${c.image}/high.webp` : null, url: cm?.idProduct ? `https://www.cardmarket.com/en/Pokemon/Products?idProduct=${cm.idProduct}` : null,
-      set: { id: c.set?.id, name: c.set?.name || c.set?.id, abbr: c.set?.id, released: null },
-      prices: [], cardmarket: cm ? { ...cm, current: cmPrice(cm) } : null,
-      pack: null, packNote: 'No booster pack price source for Chinese-language sets',
-      pull: { known: false, reason: 'No published pull-rate data for Chinese sets' }, history: [],
-    };
-  });
+  return details.filter(Boolean).map(c => zhCard(lang, c));
 }
 const cmTrendCache = new Map();
 async function cardmarketTrend(productId, dexId) {
@@ -308,8 +303,9 @@ async function cardmarketTrend(productId, dexId) {
   if (!hit) r = { found: false, reason: 'No Cardmarket listing linked to this exact TCGplayer product in TCGdex' };
   else {
     const v = hit.variants_detailed.find(v => +v.thirdParty?.tcgplayer === +productId);
-    const cm = v?.pricing?.cardmarket || hit.pricing?.cardmarket;
-    r = cm ? { found: true, tcgdexId: hit.id, set: hit.set?.name, unit: cm.unit, updated: cm.updated, avg30: cm.avg30, avg7: cm.avg7, avg1: cm.avg1, trend: cm.trend, avg: cm.avg, low: cm.low,
+    const eur = v?.pricing?.cardmarket || hit.pricing?.cardmarket;
+    const cm = L.cmUsd(eur);
+    r = cm ? { found: true, tcgdexId: hit.id, set: hit.set?.name, unit: 'USD', fromEur: true, eurRate: cm.eurRate, updated: cm.updated, avg30: cm.avg30, avg7: cm.avg7, avg1: cm.avg1, trend: cm.trend, avg: cm.avg, low: cm.low,
       holo: { avg30: cm['avg30-holo'], avg7: cm['avg7-holo'], avg1: cm['avg1-holo'], trend: cm['trend-holo'] }, url: `https://www.cardmarket.com/en/Pokemon/Products?idProduct=${cm.idProduct}` }
       : { found: false, reason: 'Card found on TCGdex but it has no Cardmarket prices' };
   }
@@ -333,10 +329,11 @@ async function search(name, langs) {
   const q = norm(name);
   if (q.trim().length < 2) return { cards: [], notes: [] };
   const want = new Set(langs);
-  const out = state.cards.filter(c => want.has(c.lang) && c.n.includes(q)).map(serializeCard);
+  const out = state.cards.filter(c => !c.t && want.has(c.lang) && c.n.includes(q)).map(serializeCard);
   const mk = c => Math.max(-1, ...c.prices.map(p => p.market ?? -1));
   const mid = c => Math.max(-1, ...c.prices.map(p => p.mid ?? -1));
-  out.sort((a, b) => (mk(b) >= 0) - (mk(a) >= 0) || mk(b) - mk(a) || mid(b) - mid(a));
+  const pr = c => { const m = mk(c); return m >= 0 ? m : mid(c); };
+  out.sort((a, b) => pr(b) - pr(a));
   const notes = [];
   const zh = langs.filter(l => l.startsWith('zh'));
   if (zh.length) {
@@ -348,6 +345,208 @@ async function search(name, langs) {
     }
   }
   return { cards: out, notes };
+}
+
+// ---------- specific-card search (name + optional set name/code and/or card number) ----------
+// Inverted index built once per price index: name word -> card idx, set word -> group keys, card number -> card idx.
+// A query only touches the posting lists of its own tokens (no full-catalog scan per keystroke).
+const numKey = s => String(s || '').toLowerCase().replace(/\s+/g, '').replace(/(^|[^0-9])0+(?=\d)/g, '$1');
+const CJK = /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]/;
+const CS = { nameIdx: new Map(), nameVocab: [], setIdx: new Map(), setVocab: [], groupCards: new Map(), gnorm: new Map(), numIdx: new Map() };
+function buildCardSearch() {
+  const t0 = Date.now();
+  const nameIdx = new Map(), setIdx = new Map(), groupCards = new Map(), gnorm = new Map(), numIdx = new Map();
+  const push = (m, k, v) => { let a = m.get(k); if (!a) m.set(k, a = []); a.push(v); };
+  for (const g of state.groups) {
+    const k = gkey(g.cat, g.groupId), n = norm(`${g.name} ${g.abbr || ''}`);
+    gnorm.set(k, n);
+    for (const w of new Set(n.trim().split(' '))) if (w) push(setIdx, w, k);
+  }
+  state.cards.forEach((c, i) => {
+    for (const w of new Set(c.n.trim().split(' '))) if (w) push(nameIdx, w, i);
+    push(groupCards, gkey(c.cat, c.groupId), i);
+    if (c.number) { const full = numKey(c.number), first = full.split('/')[0]; push(numIdx, first, i); if (full !== first) push(numIdx, full, i); }
+  });
+  Object.assign(CS, { nameIdx, nameVocab: [...nameIdx.keys()].sort(), setIdx, setVocab: [...setIdx.keys()].sort(), groupCards, gnorm, numIdx });
+  log(`Card search index: ${nameIdx.size} name words, ${setIdx.size} set words, ${numIdx.size} numbers in ${Date.now() - t0}ms`);
+}
+function prefixWords(vocab, t) { // sorted vocab -> words starting with t (binary search for the first)
+  let lo = 0, hi = vocab.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (vocab[m] < t) lo = m + 1; else hi = m; }
+  const out = []; for (let i = lo; i < vocab.length && vocab[i].startsWith(t); i++) out.push(vocab[i]);
+  return out;
+}
+function parseQuery(q) {
+  const raw = String(q || '').toLowerCase().replace(/[#№]/g, ' ').replace(/\s*\/\s*/g, '/').trim();
+  const toks = [];
+  for (const r of raw.split(/\s+/).filter(Boolean)) {
+    if (/^[a-z]{0,5}-?\d+[a-z]?\/[a-z]{0,5}\d+$/.test(r)) { toks.push({ t: r, num: numKey(r), slash: true }); continue; }
+    for (const w of norm(r).trim().split(' ').filter(Boolean)) toks.push({ t: w, num: /\d/.test(w) && /^[a-z]{0,5}\d+[a-z]?$/.test(w) ? numKey(w) : null });
+  }
+  return toks;
+}
+function tokenCandidates(tok) {
+  const out = new Set();
+  if (!tok.slash) {
+    const words = tok.t.length >= 2 ? prefixWords(CS.nameVocab, tok.t) : (CS.nameIdx.has(tok.t) ? [tok.t] : []);
+    for (const w of words) for (const i of CS.nameIdx.get(w)) out.add(i);
+    const sw = tok.t.length >= 2 ? prefixWords(CS.setVocab, tok.t) : (CS.setIdx.has(tok.t) ? [tok.t] : []);
+    for (const w of sw) for (const k of CS.setIdx.get(w)) for (const i of CS.groupCards.get(k) || []) out.add(i);
+  }
+  if (tok.num) for (const i of CS.numIdx.get(tok.num) || []) out.add(i);
+  return out;
+}
+function tokenScore(c, tok) { // best way this token matches this card, or 0
+  let s = 0;
+  if (tok.num && c.number) { const full = numKey(c.number); if (full === tok.num || full.split('/')[0] === tok.num) s = tok.slash ? 12 : 9; }
+  if (tok.slash) return s;
+  if (c.n.includes(` ${tok.t} `)) s = Math.max(s, 10); else if (tok.t.length >= 2 && c.n.includes(` ${tok.t}`)) s = Math.max(s, 6);
+  const gn = CS.gnorm.get(gkey(c.cat, c.groupId)) || '';
+  if (gn.includes(` ${tok.t} `)) s = Math.max(s, 6); else if (tok.t.length >= 2 && gn.includes(` ${tok.t}`)) s = Math.max(s, 4);
+  return s;
+}
+const bestPrice = c => Math.max(-1, ...c.prices.map(p => p.market ?? p.mid ?? -1));
+function indexCardSearch(toks, want, limit, sort = 'price') {
+  if (!toks.length) return { total: 0, hits: [] };
+  const cands = toks.map(tokenCandidates).sort((a, b) => a.size - b.size);
+  const hits = [];
+  for (const i of cands[0]) {
+    const c = state.cards[i]; if (!want.has(c.lang)) continue;
+    let score = 0, nameHits = 0, ok = true;
+    for (const tok of toks) { const s = tokenScore(c, tok); if (!s) { ok = false; break; } score += s; if (s === 10 || s === 6) nameHits++; }
+    if (!ok) continue;
+    const nameWords = c.n.trim().split(' ').length;
+    if (nameHits && nameHits >= nameWords) score += 8; // query covers the whole card name ("Charizard ex" vs "Charizard ex Special Delivery")
+    hits.push({ i, score, price: bestPrice(c) });
+  }
+  const maxScore = hits.reduce((m, h) => Math.max(m, h.score), 0);
+  if (sort === 'match') hits.sort((a, b) => b.score - a.score || b.price - a.price);
+  else hits.sort((a, b) => b.price - a.price || b.score - a.score); // default: most expensive first, unpriced (-1) last
+  return { total: hits.length, maxScore, hits: hits.slice(0, limit) };
+}
+let pokemonNorms = null;
+function dexFor(c) {
+  if (c.t || !state.pokemon.length) return null;
+  if (!pokemonNorms || pokemonNorms.src !== state.pokemon) pokemonNorms = { src: state.pokemon, list: state.pokemon.map(p => ({ id: p.id, n: norm(p.name) })).sort((a, b) => b.n.length - a.n.length) };
+  return pokemonNorms.list.find(p => c.n.includes(p.n))?.id || null;
+}
+function zhCard(lang, c) {
+  const cm = L.cmUsd(c.pricing?.cardmarket || null); // shown in USD, converted from Cardmarket's EUR
+  return {
+    id: `tcgdex:${lang}:${c.id}`, source: 'tcgdex', tcgdexId: c.id, lang, name: c.name, number: `${c.localId}${c.set?.cardCount?.official ? '/' + c.set.cardCount.official : ''}`,
+    rarity: c.rarity || null, img: c.image ? `${c.image}/high.webp` : null, url: cm?.idProduct ? `https://www.cardmarket.com/en/Pokemon/Products?idProduct=${cm.idProduct}` : null,
+    set: { id: c.set?.id, name: c.set?.name || c.set?.id, abbr: c.set?.id, released: null },
+    prices: [], cardmarket: cm ? { ...cm, current: cmPrice(cm) } : null, category: c.category || null,
+    pack: null, packNote: 'No booster pack price source for Chinese-language sets',
+    pull: { known: false, reason: 'No published pull-rate data for Chinese sets' }, history: [],
+  };
+}
+async function tcgdexNameList(lang, q) {
+  const f = L.cacheFile(`tcgdexname-${lang}-${crypto.createHash('sha1').update(q).digest('hex').slice(0, 16)}.json`);
+  let l = L.readJSON(f, null, 864e5);
+  if (!l) { l = await L.getJSON(`${L.TCGDEX}/${lang}/cards?name=like:${encodeURIComponent(q)}`, { retries: 1 }) || []; L.writeJSON(f, l); }
+  return l;
+}
+const ZH_SUFFIX = new Set(['ex', 'gx', 'v', 'vmax', 'vstar', 'lv', 'x', 'break', 'prime', 'star']);
+async function chineseCardSearch(q, toks, langs, notes) {
+  const out = [];
+  const nums = toks.filter(t => t.num).map(t => t.num);
+  let mode, dexId = null, suffix = [];
+  if (CJK.test(q)) mode = 'name';
+  else {
+    const qn = norm(toks.filter(t => !t.slash).map(t => t.t).join(' '));
+    const p = state.pokemon.map(p => ({ id: p.id, n: norm(p.name) })).filter(p => qn.includes(p.n)).sort((a, b) => b.n.length - a.n.length)[0];
+    if (!p) { notes.push('Chinese cards: type the Chinese name (e.g. 噴火龍) or an English Pokémon name to include them — trainer/item names only match in Chinese.'); return out; }
+    mode = 'dex'; dexId = p.id; suffix = qn.replace(p.n, ' ').trim().split(' ').filter(w => ZH_SUFFIX.has(w));
+  }
+  const codes = toks.filter(t => !t.slash && /^[a-z]{1,5}\d+[a-z]?$/.test(t.t)).map(t => t.t);
+  for (const lang of langs) {
+    try {
+      let list = mode === 'name' ? await tcgdexNameList(lang, q.replace(/[^\u3040-\u30ff\u3400-\u9fff\uf900-\ufaffa-zA-Z0-9]+/g, ' ').trim().split(' ').find(w => CJK.test(w)) || q.trim()) : await tcgdexList(lang, dexId);
+      if (nums.length) list = list.filter(x => nums.includes(numKey(x.localId)) || codes.some(cd => x.id.toLowerCase().startsWith(cd + '-')));
+      else if (codes.length) list = list.filter(x => codes.some(cd => x.id.toLowerCase().startsWith(cd + '-')));
+      if (suffix.length) list = list.filter(x => suffix.every(s => String(x.name).toLowerCase().includes(s)));
+      const details = await pool(list.slice(0, 12), 6, x => L.tcgdexCard(lang, x.id));
+      const cs = details.filter(Boolean).map(c => ({ ...zhCard(lang, c), dexId }));
+      cs.sort((a, b) => (b.cardmarket?.current || 0) - (a.cardmarket?.current || 0));
+      out.push(...cs);
+      if (list.length > 12) notes.push(`${list.length} ${lang} matches — showing 12; add a card number or set code (e.g. SV2a) to narrow it.`);
+    } catch (e) { notes.push(`Couldn't reach TCGdex for ${lang} cards right now.`); }
+  }
+  if (out.length) notes.push('Chinese cards come from TCGdex: names and set names are in Chinese, so English set names can’t filter them — use the card number or set code.');
+  return out;
+}
+async function cardSearch(q, langs, { zh = false, limit = 60, sort = 'price' } = {}) {
+  const toks = parseQuery(q);
+  const notes = [];
+  const cjk = CJK.test(q);
+  if ((!toks.length && !cjk) || String(q).trim().length < (cjk ? 1 : 2)) return { total: 0, cards: [], notes };
+  if (cjk && !zh) notes.push('Chinese/Japanese characters: press Enter (or Search) with Chinese selected to search Chinese cards by name; English/Japanese cards are indexed by their English names.');
+  const want = new Set(langs.filter(l => l === 'en' || l === 'ja'));
+  let r = want.size && toks.length ? indexCardSearch(toks, want, limit, sort) : { total: 0, hits: [] };
+  if (!r.total && toks.length > 1 && want.size) { // nothing matches every word: show the best partial match (drop one word)
+    let best = null;
+    for (let k = 0; k < toks.length; k++) { const rr = indexCardSearch(toks.filter((_, j) => j !== k), want, limit, sort); if (rr.total && (!best || rr.maxScore > best.r.maxScore)) best = { r: rr, dropped: toks[k].t }; }
+    if (best) { r = best.r; notes.push(`No card matches every word — showing matches without “${best.dropped}”.`); }
+  }
+  const cards = r.hits.map(h => { const c = state.cards[h.i]; return { ...serializeCard(c), dexId: dexFor(c), kind: c.t ? 'trainer' : 'pokemon' }; });
+  const zhLangs = langs.filter(l => l.startsWith('zh'));
+  if (zh && zhLangs.length && !/^\s*[a-z]{0,5}\d+\s*\/\s*[a-z]{0,5}\d+\s*$/i.test(q)) cards.push(...await chineseCardSearch(q, toks, zhLangs, notes));
+  if (sort !== 'match') { const pr = c => c.source === 'tcgdex' ? (c.cardmarket?.current ?? -1) : Math.max(-1, ...c.prices.map(p => p.market ?? p.mid ?? -1)); cards.sort((a, b) => pr(b) - pr(a)); }
+  return { total: r.total, cards, notes };
+}
+
+// ---------- graded prices (CardPrice open API: https://api.cardprice.com — free, no key, attribution required) ----------
+// Keyed by TCGplayer productId. Cached in memory for 24h (incl. "not found"), capped so the small Render instance stays small.
+const GRADED_TTL = 864e5, GRADED_MAX = 1500;
+const gradedCache = new Map(), gradedInflight = new Map();
+let gradedActive = 0; const gradedQueue = [];
+const gradedSlot = () => new Promise(r => { if (gradedActive < 3) { gradedActive++; r(); } else gradedQueue.push(r); });
+const gradedRelease = () => { const n = gradedQueue.shift(); if (n) n(); else gradedActive--; };
+async function cardpriceJSON(pathname) {
+  await gradedSlot();
+  try { return await L.getJSON(`https://api.cardprice.com${pathname}`, { retries: 1, timeout: 12000 }); } finally { gradedRelease(); }
+}
+const GRADE_ROWS = [['psa10', 'PSA 10', 'psa'], ['bgs10', 'BGS 10', 'bgs'], ['cgc10', 'CGC 10', 'cgc'], ['sgc10', 'SGC 10', 'sgc'], ['grade95', 'Grade 9.5', null], ['grade9', 'Grade 9', null], ['grade8', 'Grade 8', null], ['grade7', 'Grade 7', null], ['ungraded', 'Ungraded (raw)', null]];
+async function gradedFor(productId) {
+  const id = +productId;
+  const hit = gradedCache.get(id);
+  if (hit && Date.now() - hit.at < GRADED_TTL) return hit.r;
+  if (gradedInflight.has(id)) return gradedInflight.get(id);
+  const job = (async () => {
+    const c = state.byId.get(id);
+    let r;
+    const prod = await cardpriceJSON(`/api/product/${id}`);
+    const cardId = prod?.product?.card_id;
+    const card = cardId ? await cardpriceJSON(`/api/card/${encodeURIComponent(cardId)}`) : null;
+    if (!card?.card) r = { available: false, reason: 'CardPrice has no record of this exact TCGplayer product yet.' };
+    else {
+      const mine = (card.variants || []).filter(v => +v.productId === id);
+      const wanted = new Set(mine.map(v => v.printing ?? ''));
+      let rows = (card.gradedPrintings?.length ? card.gradedPrintings : card.graded ? [card.graded] : []).filter(Boolean);
+      let note = null;
+      const matched = rows.filter(g => wanted.has(g.printing ?? ''));
+      if (matched.length) rows = matched; else if (rows.length > 1) note = 'CardPrice lists several printings for this card; showing all of them.';
+      const pop = (card.population || []).filter(p => !wanted.size || wanted.has(p.printing ?? '') || !matched.length);
+      const printings = rows.map(g => ({
+        printing: g.printing || null, date: g.date,
+        grades: GRADE_ROWS.map(([k, label, co]) => ({ key: k, label, company: co, price: typeof g[k] === 'number' ? g[k] : null })).filter(x => x.price != null),
+      })).filter(p => p.grades.some(x => x.key !== 'ungraded'));
+      r = printings.length || pop.length ? {
+        available: printings.length > 0, reason: printings.length ? null : 'CardPrice has population data but no graded sale prices for this card yet.',
+        note, cardId: card.card.id, name: card.card.name, printings,
+        population: pop.map(p => ({ printing: p.printing || null, company: p.company, total: p.total, gem: p.gem, dist: p.dist, updated: p.updated_at })),
+        source: { name: 'CardPrice', url: card.card.slug ? `https://cardprice.com/card/${card.card.slug}` : 'https://cardprice.com' },
+        currency: 'USD',
+      } : { available: false, reason: 'No graded sales recorded for this card on CardPrice yet.', source: card.card.slug ? { name: 'CardPrice', url: `https://cardprice.com/card/${card.card.slug}` } : null };
+    }
+    if (c && !r.available) r.hint = c.lang === 'ja' ? 'Japanese cards are graded less often, so many have no tracked graded sales.' : null;
+    if (gradedCache.size >= GRADED_MAX) gradedCache.delete(gradedCache.keys().next().value);
+    gradedCache.set(id, { at: Date.now(), r });
+    return r;
+  })().finally(() => gradedInflight.delete(id));
+  gradedInflight.set(id, job);
+  return job;
 }
 
 const sealedPrice = x => { const ps = x.prices.filter(p => p.market != null); if (ps.length) return ps[0].market; const m = x.prices.find(p => p.mid != null); return m ? m.mid : null; };
@@ -366,11 +565,11 @@ function sealedSets(langs) {
 function sealedSearch({ q, type, langs, cat, groupId, pokemon, exclude }) {
   const terms = String(q || '').toLowerCase().split(/\s+/).filter(Boolean);
   let groups = null;
-  if (pokemon) { const pq = norm(pokemon); groups = new Set(state.cards.filter(c => c.n.includes(pq)).map(c => gkey(c.cat, c.groupId))); }
+  if (pokemon) { const pq = norm(pokemon); groups = new Set(state.cards.filter(c => !c.t && c.n.includes(pq)).map(c => gkey(c.cat, c.groupId))); }
   const out = state.sealed.filter(x => langs.includes(x.lang) && (!type || x.type === type) && (!exclude || x.type !== exclude) && (!groupId || (x.groupId === +groupId && x.cat === +cat))
     && (!groups || groups.has(gkey(x.cat, x.groupId)))
     && terms.every(t => (x.n + ' ' + state.groupByKey.get(gkey(x.cat, x.groupId)).name.toLowerCase()).includes(t)));
-  out.sort((a, b) => (sealedPrice(b) != null) - (sealedPrice(a) != null) || (sealedPrice(b) ?? 0) - (sealedPrice(a) ?? 0));
+  out.sort((a, b) => (sealedPrice(b) ?? -1) - (sealedPrice(a) ?? -1)); // most expensive first, unpriced last
   return { total: out.length, items: out.slice(0, groupId ? 500 : 300).map(serializeSealed) };
 }
 
@@ -386,7 +585,7 @@ function currentFor(a) {
   }
   if (a.source === 'tcgdex') {
     const c = L.readJSON(L.cacheFile(`tcgdex-${a.language}-${a.tcgdexId.replace(/[^\w.-]/g, '_')}.json`), null);
-    return cmPrice(c?.pricing?.cardmarket);
+    return cmPrice(L.cmUsd(c?.pricing?.cardmarket));
   }
   return null;
 }
@@ -396,10 +595,11 @@ function quoteFor(a, cm) {
   let current, avg;
   if (a.source === 'tcgdex') {
     if (cm === undefined) cm = L.readJSON(L.cacheFile(`tcgdex-${a.language}-${String(a.tcgdexId).replace(/[^\w.-]/g, '_')}.json`), null)?.pricing?.cardmarket;
-    current = AL.cmCurrent(cm); avg = AL.cmAverage(cm);
+    cm = L.cmUsd(cm); current = AL.cmCurrent(cm); avg = AL.cmAverage(cm);
+    a = AL.usdAlert(a, L.fxNow().rate);
   } else { current = currentFor(a); avg = AL.historyAverage(histPoints(`${a.productId}|${a.subType}`)); }
   const ev = AL.evaluate(a, current, avg);
-  return { current, average: avg.average, averageBasis: avg.averageBasis, averageDays: avg.averageDays, averageLimited: avg.averageLimited,
+  return { ...(a.source === 'tcgdex' ? { currency: 'USD', target: a.target ?? null, eurRate: L.fxNow().rate } : {}), current, average: avg.average, averageBasis: avg.averageBasis, averageDays: avg.averageDays, averageLimited: avg.averageLimited,
     mode: ev.mode, percent: ev.percent, triggerPrice: ev.triggerPrice, percentOfAverage: ev.percentOfAverage, triggered: ev.hit };
 }
 
@@ -470,7 +670,7 @@ const server = http.createServer(async (req, res) => {
         } finally { alertCheckRunning = false; }
       }
 
-      if (p === '/api/status') return send(res, 200, { ready: state.cards.length > 0, loading: state.loading, progress: state.progress, cards: state.cards.length, japaneseCards: state.cards.filter(c => c.lang === 'ja').length, sets: state.groups.length, packs: state.packs.size, sealed: (state.sealed || []).length, pricesUpdated: state.lastUpdated, indexedAt: state.indexedAt, historyDays: state.historyDays, storage: store.kind, pullRates: PULL._about });
+      if (p === '/api/status') return send(res, 200, { ready: state.cards.length > 0, loading: state.loading, progress: state.progress, cards: state.cards.length, japaneseCards: state.cards.filter(c => c.lang === 'ja').length, trainerCards: state.cards.filter(c => c.t).length, indexVersion: state.indexV, sets: state.groups.length, packs: state.packs.size, sealed: (state.sealed || []).length, pricesUpdated: state.lastUpdated, indexedAt: state.indexedAt, historyDays: state.historyDays, storage: store.kind, pullRates: PULL._about, fx: { eurUsd: L.fxNow().rate, date: L.fxNow().date, source: L.fxNow().source } });
       if (p === '/api/pokemon') return send(res, 200, state.pokemon);
       if (p === '/api/search') {
         if (!state.cards.length) return send(res, 503, { error: 'Price index is still loading, try again in a moment', progress: state.progress });
@@ -487,6 +687,22 @@ const server = http.createServer(async (req, res) => {
         await withHistory();
         const r = sealedSearch({ q: u.searchParams.get('q'), type: u.searchParams.get('type'), langs, cat: u.searchParams.get('cat'), groupId: u.searchParams.get('groupId'), pokemon: u.searchParams.get('pokemon'), exclude: u.searchParams.get('exclude') });
         return send(res, 200, { pricesUpdated: state.lastUpdated, ...r, types: SEALED_TYPES.map(t => t[0]), note: zhNote });
+      }
+      if (p === '/api/cardsearch') {
+        if (!state.cards.length) return send(res, 503, { error: 'Price index is still loading, try again in a moment', progress: state.progress });
+        const langs = (u.searchParams.get('langs') || 'en,ja,zh-tw,zh-cn').split(',').filter(l => ['en', 'ja', 'zh-tw', 'zh-cn'].includes(l));
+        const q = String(u.searchParams.get('q') || '').slice(0, 80);
+        const zh = u.searchParams.get('zh') === '1';
+        const limit = Math.min(60, Math.max(1, +u.searchParams.get('limit') || 60));
+        if (zh) await withHistory();
+        const sort = u.searchParams.get('sort') === 'match' ? 'match' : 'price';
+        return send(res, 200, { query: q, sort, pricesUpdated: state.lastUpdated, ...(await cardSearch(q, langs, { zh, limit, sort })) });
+      }
+      if (p === '/api/graded') {
+        const id = +u.searchParams.get('productId');
+        if (!id || !state.byId.has(id)) return send(res, 404, { available: false, reason: 'Unknown card' });
+        try { return send(res, 200, await gradedFor(id)); }
+        catch (e) { log('graded lookup failed', id, e.message); return send(res, 200, { available: false, reason: 'CardPrice is not responding right now — try again in a bit.', temporary: true }); }
       }
       if (p === '/api/trend') return send(res, 200, await cardmarketTrend(u.searchParams.get('productId'), u.searchParams.get('dexId')));
 
@@ -544,7 +760,7 @@ const server = http.createServer(async (req, res) => {
           const lang = ['zh-tw', 'zh-cn'].includes(q.lang) ? q.lang : null;
           const c = lang && await L.tcgdexCard(lang, String(q.tcgdexId || '')).catch(() => null);
           if (!c) return send(res, 404, { error: 'Unknown card' });
-          a = { source: 'tcgdex', language: lang, tcgdexId: c.id, currency: 'EUR' }; cm = c.pricing?.cardmarket || null;
+          a = { source: 'tcgdex', language: lang, tcgdexId: c.id, currency: 'USD' }; cm = c.pricing?.cardmarket || null;
         } else {
           const kind = ['card', 'pack', 'sealed'].includes(q.kind) ? q.kind : 'card', id = +q.productId;
           const rows = kind === 'pack' ? null : kind === 'sealed' ? state.sealedById?.get(id)?.prices : state.byId.get(id)?.prices;
@@ -576,7 +792,7 @@ const server = http.createServer(async (req, res) => {
             const c = lang && await L.tcgdexCard(lang, String(b.tcgdexId || '')).catch(() => null);
             if (!c) return send(res, 400, { error: 'Unknown card' });
             const cm = c.pricing?.cardmarket;
-            item = { kind: 'card', source: 'tcgdex', tcgdexId: c.id, productId: null, subType: null, name: c.name, set: c.set?.name || c.set?.id, language: lang, currency: 'EUR', priceField: 'Cardmarket trend (avg if no trend) via TCGdex', url: cm?.idProduct ? `https://www.cardmarket.com/en/Pokemon/Products?idProduct=${cm.idProduct}` : null, img: c.image ? `${c.image}/high.webp` : null };
+            item = { kind: 'card', source: 'tcgdex', tcgdexId: c.id, productId: null, subType: null, name: c.name, set: c.set?.name || c.set?.id, language: lang, currency: 'USD', priceField: 'Cardmarket trend (avg if no trend) via TCGdex, converted from EUR', url: cm?.idProduct ? `https://www.cardmarket.com/en/Pokemon/Products?idProduct=${cm.idProduct}` : null, img: c.image ? `${c.image}/high.webp` : null };
           } else if (b.kind === 'sealed') {
             const x = state.sealedById.get(+b.productId); if (!x) return send(res, 400, { error: 'Unknown sealed product' });
             const g = state.groupByKey.get(gkey(x.cat, x.groupId));
@@ -625,12 +841,14 @@ server.listen(PORT, '0.0.0.0', () => log(`Listening on port ${PORT} (${PROD ? 'p
   state.storeReady = true;
   await loadPokemon().catch(e => log('PokeAPI failed', e.message));
   const snap = await store.getBlob('index:latest').catch(e => { log('saved index read failed', e.message); return null; });
-  if (snap?.v === 1 && snap.cards?.length) { applyIndex(snap); state.indexSource = 'saved'; log(`Loaded saved index (prices ${snap.stamp}) in ${Date.now() - t0}ms`); }
+  if ((snap?.v === 1 || snap?.v === INDEX_V) && snap.cards?.length) { applyIndex(snap); state.indexSource = 'saved'; log(`Loaded saved index (prices ${snap.stamp}) in ${Date.now() - t0}ms`); }
   state.historyDays = (await store.listBlobs('history:').catch(() => [])).map(n => n.slice(8));
   const refresh = async () => {
-    try { const s = await L.getText('https://tcgcsv.com/last-updated.txt'); if (s !== state.lastUpdated) await buildIndex(); }
+    try { const s = await L.getText('https://tcgcsv.com/last-updated.txt'); if (s !== state.lastUpdated || state.indexV !== INDEX_V) await buildIndex(); }
     catch (e) { log('refresh check failed', e.message); if (!state.cards.length) await buildIndex().catch(e2 => log('index failed', e2.message)); }
   };
+  L.eurUsd().then(f => log(`EUR->USD ${f.rate} (${f.date || f.source})`)).catch(() => {});
+  setInterval(() => L.eurUsd().catch(() => {}), 6 * 3600e3);
   refresh(); // background: the site serves the saved index meanwhile
   setInterval(refresh, 60 * 60 * 1000); // TCGCSV refreshes ~daily (~20:00 UTC); only re-pull when its stamp changes
 })().catch(e => { log('startup failed:', e.stack || e.message); process.exit(1); });

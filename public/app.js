@@ -23,8 +23,9 @@ const bestVariant = c => {
   return ms.length ? ms.reduce((a, b) => b.mid > a.mid ? b : a) : null;
 };
 const cardPrice = c => { if (c.source === 'tcgdex') return c.cardmarket?.current ?? null; const v = bestVariant(c); return v ? (v.market ?? v.mid) : null; };
-const cardCur = c => c.source === 'tcgdex' ? 'EUR' : 'USD';
-const priceLabel = c => { if (c.source === 'tcgdex') return 'Cardmarket trend'; const v = bestVariant(c); return v ? (v.market != null ? `market · ${v.sub}` : `listing mid · ${v.sub}`) : ''; };
+const cardCur = () => 'USD'; // everything is shown in USD; Cardmarket (EUR) prices are converted server-side at the daily ECB rate
+const fxNote = cm => `converted from EUR at 1 EUR = $${(cm?.eurRate || S.status?.fx?.eurUsd || 0).toFixed(4)}`;
+const priceLabel = c => { if (c.source === 'tcgdex') return 'Cardmarket trend · converted from EUR'; const v = bestVariant(c); return v ? (v.market != null ? `market · ${v.sub}` : `listing mid · ${v.sub}`) : ''; };
 const hasMarket = c => c.source === 'tcgcsv' && c.prices.some(p => p.market != null);
 const packPrice = p => p ? (p.market ?? p.mid ?? null) : null;
 
@@ -90,7 +91,7 @@ async function choose(p, keepUrl) {
     S.cards = r.cards; S.shown = 48;
     const notes = [...r.notes];
     const zhSel = S.lang === 'all' || S.lang.startsWith('zh');
-    if (zhSel && r.cards.some(c => c.source === 'tcgdex')) notes.push('Chinese cards: prices are Cardmarket trend prices in EUR from TCGdex (Cardmarket may not separate Chinese printings from other languages), there is no booster pack price source, and no pull-rate data.');
+    if (zhSel && r.cards.some(c => c.source === 'tcgdex')) notes.push('Chinese cards: prices are Cardmarket trend prices from TCGdex, converted from EUR to USD at the daily ECB rate (Cardmarket may not separate Chinese printings from other languages), there is no booster pack price source, and no pull-rate data.');
     if (S.lang === 'ja' || S.lang === 'all') notes.push('Japanese cards use TCGplayer USD prices; pull rates are only published for English sets.');
     $('#notes').innerHTML = notes.map(esc).join('<br>');
     const counts = Object.entries(r.cards.reduce((a, c) => (a[c.lang] = (a[c.lang] || 0) + 1, a), {})).map(([l, n]) => `${n} ${LANGNAME[l]}`).join(' · ');
@@ -154,22 +155,19 @@ function filtered() {
   if ($('#pricedOnly').checked) list = list.filter(c => cardPrice(c) != null);
   const date = c => c.set.released ? Date.parse(c.set.released) : 0;
   const sorts = {
-    price: (a, b) => (cardCur(a) === 'EUR') - (cardCur(b) === 'EUR') || hasMarket(b) - hasMarket(a) || (cardPrice(b) ?? -1) - (cardPrice(a) ?? -1),
+    price: (a, b) => (cardPrice(b) ?? -1) - (cardPrice(a) ?? -1), // most expensive first, unpriced last
     priceAsc: (a, b) => (cardPrice(a) ?? 1e12) - (cardPrice(b) ?? 1e12),
     newest: (a, b) => date(b) - date(a), oldest: (a, b) => (date(a) || 1e15) - (date(b) || 1e15),
     pull: (a, b) => (b.pull?.specificOneIn || 0) - (a.pull?.specificOneIn || 0),
   };
   return list.sort(sorts[$('#sort').value]);
 }
-function renderGrid() {
-  const list = filtered();
-  const slice = list.slice(0, S.shown);
-  $('#grid').innerHTML = slice.map((c, i) => {
+function cardTile(c, idx) {
     const pr = cardPrice(c), cur = cardCur(c);
     const pp = packPrice(c.pack);
-    return `<article class="c" data-i="${S.cards.indexOf(c)}">
+    return `<article class="c" data-i="${idx}">
       <div class="img">${c.img ? `<img src="${esc(c.img)}" alt="${esc(c.name)}" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'noimg',textContent:'No image'}))">` : '<span class="noimg">No image</span>'}
-        <span class="badge">${LANG[c.lang]}</span>${c.rarity ? `<span class="badge r">${esc(c.rarity)}</span>` : ''}</div>
+        <span class="badge">${LANG[c.lang]}</span>${c.kind === 'trainer' ? '<span class="badge t">Trainer/Energy</span>' : ''}${c.rarity ? `<span class="badge r">${esc(c.rarity)}</span>` : ''}</div>
       <div class="body">
         <div class="name">${esc(c.name)}</div>
         <div class="set">${esc(c.set.name)}${c.number ? ' · #' + esc(c.number) : ''}</div>
@@ -177,7 +175,11 @@ function renderGrid() {
         <div class="pull">${c.pull?.known ? `🎲 ${esc(c.pull.tier)}: 1 in ${c.pull.tierOneIn} packs${c.pull.specificOneIn ? ` · this card ≈1 in ${c.pull.specificOneIn.toLocaleString()}` : ''}` : '<span class="muted">🎲 Pull rate unknown</span>'}</div>
         <div class="packrow">${c.pack ? `${c.pack.img ? `<img src="${esc(c.pack.img)}" alt="" loading="lazy">` : ''}<span>Pack: <b>${pp != null ? fmt(pp) : 'no recent sales'}</b><br><span class="muted">${esc(c.pack.name.length > 38 ? c.pack.name.slice(0, 36) + '…' : c.pack.name)}</span></span>` : `<span class="muted">${esc(c.packNote || 'No pack price')}</span>`}</div>
       </div></article>`;
-  }).join('') || '<div class="muted">No cards match.</div>';
+}
+function renderGrid() {
+  const list = filtered();
+  const slice = list.slice(0, S.shown);
+  $('#grid').innerHTML = slice.map(c => cardTile(c, S.cards.indexOf(c))).join('') || '<div class="muted">No cards match.</div>';
   $('#moreBtn').hidden = list.length <= S.shown;
   $('#moreBtn').textContent = `Show more (${list.length - S.shown} left)`;
 }
@@ -195,7 +197,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') document.que
 
 function alertForm(kind, c, variants) {
   if (!S.user) return `<div class="muted small">Log in to set a price alert. <a href="#" data-login>Log in</a></div>`;
-  const sym = kind === 'card' && c.source === 'tcgdex' ? '€' : '$';
+  const sym = '$';
   return `<form class="alertform" data-kind="${kind}" data-id="${esc(kind === 'pack' ? c.pack.id : (c.source === 'tcgdex' ? c.tcgdexId : c.id))}" data-src="${esc(c.source || 'tcgcsv')}" data-lang="${esc(c.lang)}">
     ${variants && variants.length > 1 ? `<select name="sub">${variants.map(v => `<option>${esc(v)}</option>`).join('')}</select>` : ''}
     <select name="mode" title="Alert type"><option value="percent" selected>Below % of 30-day avg</option><option value="target">At/below fixed price</option></select>
@@ -228,7 +230,7 @@ async function openCard(c) {
   const cur = cardCur(c);
   const variants = c.prices.map(p => p.sub);
   const priceRows = c.source === 'tcgdex'
-    ? (c.cardmarket ? `<tr><td>Cardmarket</td><td>${fmt(c.cardmarket.trend, 'EUR')}</td><td>${fmt(c.cardmarket.low, 'EUR')}</td><td>${fmt(c.cardmarket.avg, 'EUR')}</td><td>—</td></tr>` : '<tr><td colspan="5" class="muted">No price data</td></tr>')
+    ? (c.cardmarket ? `<tr><td>Cardmarket</td><td>${fmt(c.cardmarket.trend)}</td><td>${fmt(c.cardmarket.low)}</td><td>${fmt(c.cardmarket.avg)}</td><td>—</td></tr>` : '<tr><td colspan="5" class="muted">No price data</td></tr>')
     : c.prices.map(p => `<tr><td>${esc(p.sub)}</td><td><b>${fmt(p.market)}</b></td><td>${fmt(p.low)}</td><td>${fmt(p.mid)}</td><td>${fmt(p.high)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">No listings</td></tr>';
   const pp = packPrice(c.pack);
   $('#cardBody').innerHTML = `<div class="detail">
@@ -236,12 +238,13 @@ async function openCard(c) {
     <div>
       <h2>${esc(c.name)}</h2>
       <div class="kv"><span>Set</span><span>${esc(c.set.name)}</span><span>Number</span><span>${esc(c.number || '—')}</span><span>Rarity</span><span>${esc(c.rarity || '—')}</span><span>Language</span><span>${LANGNAME[c.lang]}</span>${c.set.released ? `<span>Released</span><span>${new Date(c.set.released).toLocaleDateString()}</span>` : ''}</div>
-      <div class="box"><h4>Current prices ${c.source === 'tcgdex' ? '(Cardmarket via TCGdex, EUR)' : '(TCGplayer, USD)'}</h4>
+      <div class="box"><h4>Current prices ${c.source === 'tcgdex' ? '(Cardmarket via TCGdex, USD converted from EUR)' : '(TCGplayer, USD)'}</h4>
         <table class="t"><thead><tr><th>${c.source === 'tcgdex' ? 'Source' : 'Variant'}</th><th>${c.source === 'tcgdex' ? 'Trend' : 'Market'}</th><th>Low</th><th>${c.source === 'tcgdex' ? 'Avg' : 'Mid'}</th><th>High</th></tr></thead><tbody>${priceRows}</tbody></table>
-        <div class="muted small">${c.source === 'tcgdex' ? `Updated ${c.cardmarket?.updated ? new Date(c.cardmarket.updated).toLocaleString() : '—'}.` : `“Market” is TCGplayer's recent-sales market price; low/mid/high are current listings. Updated ${new Date(S.status?.pricesUpdated).toLocaleString()}.`}
+        <div class="muted small">${c.source === 'tcgdex' ? `Prices ${fxNote(c.cardmarket)} (ECB daily reference rate). Updated ${c.cardmarket?.updated ? new Date(c.cardmarket.updated).toLocaleString() : '—'}.` : `“Market” is TCGplayer's recent-sales market price; low/mid/high are current listings. Updated ${new Date(S.status?.pricesUpdated).toLocaleString()}.`}
         ${c.url ? ` <a href="${esc(c.url)}" target="_blank" rel="noopener">View on ${c.source === 'tcgdex' ? 'Cardmarket' : 'TCGplayer'} ↗</a>` : ''}</div>
         ${alertForm('card', c, variants)}
       </div>
+      <div class="box"><h4>Graded prices (PSA · BGS · CGC · SGC)</h4><div id="gradedArea" class="muted small">Loading graded prices…</div></div>
       <div class="box"><h4>Booster pack it came from</h4>
         ${c.pack ? `<div class="row" style="align-items:center">${c.pack.img ? `<img src="${esc(c.pack.img)}" style="width:54px;border-radius:6px" alt="">` : ''}<div class="grow"><b>${esc(c.pack.name)}</b><br><span class="price" style="font-size:18px">${pp != null ? fmt(pp) : 'No recent sales'}</span> <span class="muted small">${c.pack.market != null ? 'TCGplayer market' : c.pack.mid != null ? 'listing mid' : ''}${c.pack.fromParent ? ` · pack of parent set “${esc(c.pack.fromParent)}”` : ''}</span><br><a href="${esc(c.pack.url)}" target="_blank" rel="noopener">View pack on TCGplayer ↗</a></div></div>
           ${pp != null && cardPrice(c) != null && cur === 'USD' ? `<div class="muted small" style="margin-top:6px">This card is worth ≈ ${Math.max(0, cardPrice(c) / pp).toFixed(cardPrice(c) / pp < 10 ? 1 : 0)} packs.</div>` : ''}
@@ -257,15 +260,16 @@ async function openCard(c) {
       <div class="box"><h4>Price trend</h4><div id="trendArea" class="muted small">Loading Cardmarket averages…</div></div>
     </div></div>`;
   openModal('#cardModal'); initAlertForms();
+  loadGraded(c);
   // Trend: Cardmarket 30/7/1-day averages + our own recorded daily TCGplayer snapshots
   const area = $('#trendArea');
   let cm = null;
-  if (c.source === 'tcgdex') cm = c.cardmarket ? { found: true, unit: 'EUR', ...c.cardmarket } : { found: false, reason: 'No Cardmarket data' };
-  else { try { cm = await api(`/api/trend?productId=${c.id}&dexId=${S.current?.id || ''}`); } catch (e) { cm = { found: false, reason: e.message }; } }
+  if (c.source === 'tcgdex') cm = c.cardmarket ? { found: true, ...c.cardmarket, unit: 'USD' } : { found: false, reason: 'No Cardmarket data' };
+  else { try { cm = await api(`/api/trend?productId=${c.id}&dexId=${(c.dexId !== undefined ? c.dexId : S.current?.id) || ''}`); } catch (e) { cm = { found: false, reason: e.message }; } }
   const hist = (c.history || []).filter(h => h.points.length);
   const days = new Set(hist.flatMap(h => h.points.map(p => p.d)));
   let html = '';
-  if (cm.found) html += `<div class="minichart"><canvas id="cmChart"></canvas></div><div class="muted small">Cardmarket average sale price over the last 30 days, 7 days and 1 day, plus Cardmarket's trend price (${esc(cm.unit || 'EUR')}). Updated ${cm.updated ? esc(new Date(cm.updated).toLocaleString()) : '—'}${cm.url ? ` · <a href="${esc(cm.url)}" target="_blank" rel="noopener">Cardmarket ↗</a>` : ''}.</div>`;
+  if (cm.found) html += `<div class="minichart"><canvas id="cmChart"></canvas></div><div class="muted small">Cardmarket average sale price over the last 30 days, 7 days and 1 day, plus Cardmarket's trend price (USD, ${esc(fxNote(cm))}). Updated ${cm.updated ? esc(new Date(cm.updated).toLocaleString()) : '—'}${cm.url ? ` · <a href="${esc(cm.url)}" target="_blank" rel="noopener">Cardmarket ↗</a>` : ''}.</div>`;
   else html += `<div class="muted small">Cardmarket averages: unavailable — ${esc(cm.reason)}.</div>`;
   if (c.source === 'tcgcsv') html += days.size >= 2
     ? `<div class="minichart" style="margin-top:12px"><canvas id="histChart"></canvas></div><div class="muted small">Daily TCGplayer market price recorded by this site (${days.size} days).</div>`
@@ -276,7 +280,7 @@ async function openCard(c) {
     const pts = [['30-day avg', cm.avg30], ['7-day avg', cm.avg7], ['1-day avg', cm.avg1], ['Trend', cm.trend]];
     const ds = [{ label: 'Cardmarket (normal)', data: pts.map(p => p[1] || null), borderColor: '#facc15', backgroundColor: 'rgba(250,204,21,.15)', fill: true, tension: .3, spanGaps: true }];
     if (cm.holo && (cm.holo.avg30 || cm.holo.trend)) ds.push({ label: 'Cardmarket (holo/reverse)', data: [cm.holo.avg30, cm.holo.avg7, cm.holo.avg1, cm.holo.trend].map(v => v || null), borderColor: '#60a5fa', tension: .3, spanGaps: true });
-    base.scales.y.ticks.callback = v => fmt(v, cm.unit || 'EUR');
+    base.scales.y.ticks.callback = v => fmt(v);
     miniCharts.push(new Chart($('#cmChart'), { type: 'line', data: { labels: pts.map(p => p[0]), datasets: ds }, options: base }));
   }
   if (c.source === 'tcgcsv' && days.size >= 2) {
@@ -285,6 +289,45 @@ async function openCard(c) {
     miniCharts.push(new Chart($('#histChart'), { type: 'line', data: { labels, datasets: hist.map((h, i) => ({ label: h.sub, data: labels.map(d => h.points.find(p => p.d === d)?.m ?? null), borderColor: colors[i % 4], tension: .25, spanGaps: true })) },
       options: { ...base, scales: { ...base.scales, y: { ...base.scales.y, ticks: { color: '#8b93ab', callback: v => fmt(v) } } } } }));
   }
+}
+// ---------- graded prices (CardPrice) ----------
+function gradedLinks(c) {
+  const base = String(c.name || '').replace(/\s-\s.*$/, '');
+  const num = String(c.number || '').split('/')[0];
+  const q = `${base} ${num}`.trim();
+  const setName = c.source === 'tcgdex' ? '' : ' ' + (c.set?.name || '');
+  return `<a href="https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent('PSA ' + q + setName)}&LH_Sold=1&LH_Complete=1" target="_blank" rel="noopener">eBay sold graded listings ↗</a> · <a href="https://www.pricecharting.com/search-products?type=prices&q=${encodeURIComponent(q + setName)}" target="_blank" rel="noopener">PriceCharting ↗</a>`;
+}
+async function loadGraded(c) {
+  const area = $('#gradedArea'); if (!area) return;
+  if (c.source === 'tcgdex') {
+    area.classList.remove('muted');
+    area.innerHTML = `<div><b>Not available</b> — no free graded-price source covers Chinese-language cards (CardPrice tracks English &amp; Japanese TCGplayer products only).</div><div class="small" style="margin-top:6px">Check by hand: ${gradedLinks(c)}</div>`;
+    return;
+  }
+  let g;
+  try { g = await api(`/api/graded?productId=${c.id}`); } catch (e) { g = { available: false, reason: e.message }; }
+  if (!document.body.contains(area)) return;
+  area.classList.remove('muted');
+  const pop = (g.population || []).filter(p => p.total);
+  const popHtml = pop.length ? `<div class="small" style="margin-top:6px">${pop.map(p => {
+      const gem = p.total ? Math.round(p.gem / p.total * 100) : 0, n9 = Array.isArray(p.dist) ? p.dist[8] : null;
+      return `<div><b>${esc(String(p.company).toUpperCase())} population${p.printing ? ` (${esc(p.printing)})` : ''}:</b> ${p.total.toLocaleString()} graded · 10s: ${p.gem.toLocaleString()} (${gem}%)${n9 != null ? ` · 9s: ${n9.toLocaleString()}` : ''} <span class="muted">as of ${esc(p.updated || '—')}</span></div>`;
+    }).join('')}</div>` : '';
+  if (!g.available) {
+    area.innerHTML = `<div><b>Not available</b> — ${esc(g.reason || 'no graded data')}${g.hint ? ' ' + esc(g.hint) : ''}</div>${popHtml}<div class="small" style="margin-top:6px">Check by hand: ${gradedLinks(c)}${g.source?.url ? ` · <a href="${esc(g.source.url)}" target="_blank" rel="noopener">CardPrice ↗</a>` : ''}</div>`;
+    return;
+  }
+  const raw = cardPrice(c);
+  const cols = g.printings;
+  const keys = []; cols.forEach(p => p.grades.forEach(x => { if (!keys.some(k => k.key === x.key)) keys.push(x); }));
+  const head = `<tr><th>Grade</th>${cols.map(p => `<th>${esc(cols.length > 1 ? (p.printing || 'Unlimited') : 'Price')}</th>`).join('')}</tr>`;
+  const rows = keys.map(k => `<tr class="${k.key === 'psa10' ? 'hl' : ''}"><td>${esc(k.label)}${k.company || k.key === 'ungraded' ? '' : ' <span class="muted small">any grader</span>'}</td>${cols.map(p => { const v = p.grades.find(x => x.key === k.key)?.price; return `<td>${k.key === 'psa10' ? `<b>${fmt(v)}</b>` : fmt(v)}</td>`; }).join('')}</tr>`).join('');
+  const psa10 = cols[0].grades.find(x => x.key === 'psa10')?.price;
+  area.innerHTML = `<table class="t gt"><thead>${head}</thead><tbody>${rows}</tbody></table>
+    ${psa10 && raw ? `<div class="small" style="margin-top:4px">PSA 10 ≈ <b>${(psa10 / raw).toFixed(1)}×</b> the raw TCGplayer market price.</div>` : ''}
+    ${popHtml}
+    <div class="muted small" style="margin-top:6px">${g.note ? esc(g.note) + ' ' : ''}Grades 7–9.5 are the going rate for that grade from any grading company (mostly PSA); the “10” rows are company-specific. USD, updated ${esc(cols[0].date || '—')}. Source: <a href="${esc(g.source.url)}" target="_blank" rel="noopener">CardPrice ↗</a> · also see ${gradedLinks(c)}</div>`;
 }
 $('#cardBody').addEventListener('click', e => { if (e.target.closest('[data-login]')) { e.preventDefault(); showAuth('login'); } });
 $('#cardBody').addEventListener('change', e => { const f = e.target.closest('.alertform'); if (f) refreshQuote(f); });
@@ -363,6 +406,33 @@ $('#profileForm').addEventListener('submit', async e => {
 });
 $('#logoutBtn').addEventListener('click', async () => { await api('/api/logout', { method: 'POST' }); setUser(null); closeModal($('#alertsModal')); toast('Logged out'); });
 
+// ---------- find a specific card ----------
+const FS = { langs: 'en,ja,zh-tw,zh-cn', cards: [], seq: 0, timer: null };
+async function findCards(zh = FS.zh) {
+  FS.zh = zh;
+  const q = $('#fq').value.trim(); const seq = ++FS.seq;
+  if (q.length < (/[\u3400-\u9fff]/.test(q) ? 1 : 2)) { FS.cards = []; $('#fGrid').innerHTML = ''; $('#fNotes').innerHTML = ''; $('#fCount').textContent = ''; return; }
+  const wantZh = zh && FS.langs.includes('zh');
+  $('#fCount').textContent = wantZh ? 'Searching (including Chinese cards)…' : 'Searching…';
+  try {
+    const r = await api(`/api/cardsearch?q=${encodeURIComponent(q)}&langs=${FS.langs}${wantZh ? '&zh=1' : ''}&sort=${$('#fSort').value}`);
+    if (seq !== FS.seq) return;
+    FS.cards = r.cards;
+    $('#fGrid').innerHTML = r.cards.map((c, i) => cardTile(c, i)).join('') || `<div class="muted">No cards match “${esc(q)}”. Try fewer words, the set name, or the card number (e.g. 199 or 215/203).</div>`;
+    $('#fNotes').innerHTML = (r.notes || []).map(n => `<div class="note">${esc(n)}</div>`).join('');
+    const tcg = r.cards.filter(c => c.source === 'tcgcsv').length, zhn = r.cards.length - tcg;
+    const hasEnJa = FS.langs.includes('en') || FS.langs.includes('ja');
+    $('#fCount').textContent = [hasEnJa ? `${r.total.toLocaleString()} English/Japanese match${r.total === 1 ? '' : 'es'}${r.total > tcg ? ` (showing top ${tcg})` : ''}` : '', zhn ? `${zhn} Chinese` : '', !wantZh && FS.langs.includes('zh') ? 'press Enter to include Chinese cards' : ''].filter(Boolean).join(' · ');
+  } catch (e) { if (seq === FS.seq) { $('#fCount').textContent = ''; $('#fGrid').innerHTML = `<div class="muted">${esc(e.message)}</div>`; } }
+}
+$('#fq').addEventListener('input', () => { clearTimeout(FS.timer); FS.timer = setTimeout(() => findCards(false), 250); });
+$('#fq').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(FS.timer); findCards(true); } });
+$('#fBtn').addEventListener('click', () => { clearTimeout(FS.timer); findCards(true); });
+$('#fLangs').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; [...$('#fLangs').children].forEach(x => x.classList.toggle('on', x === b)); FS.langs = b.dataset.l; findCards(FS.langs.startsWith('zh')); });
+$('#fSort').addEventListener('change', () => findCards());
+$('#fGrid').addEventListener('click', e => { const a = e.target.closest('.c'); if (a) openCard(FS.cards[+a.dataset.i]); });
+document.querySelectorAll('[data-example]').forEach(b => b.addEventListener('click', () => { $('#fq').value = b.dataset.example; findCards(false); }));
+
 // ---------- sealed products ----------
 const SS = { langs: 'en,ja', type: '', items: [], shown: 48, chart: null, scale: 'logarithmic', sets: [], loaded: false, seq: 0 };
 const TYPE_ICON = { 'Booster Box': '📦', 'Elite Trainer Box': '🎁', 'Booster Bundle': '🧺', 'Booster Pack': '🎴', 'Collection / Box': '🗃️', Tin: '🥫', Blister: '🧷', Deck: '🃏', Display: '🏪', Case: '🚚' };
@@ -371,13 +441,15 @@ const sPrice = x => { const m = x.prices.find(p => p.market != null); if (m) ret
 const sHasMarket = x => x.prices.some(p => p.market != null);
 function setMode(m) {
   [...$('#modes').children].forEach(b => b.classList.toggle('on', b.dataset.m === m));
-  $('#cardsView').hidden = m !== 'cards'; $('#sealedView').hidden = m !== 'sealed';
+  $('#cardsView').hidden = m !== 'cards'; $('#sealedView').hidden = m !== 'sealed'; $('#findView').hidden = m !== 'find';
+  if (m === 'find') setTimeout(() => $('#fq').focus(), 0);
   if (m === 'sealed') {
     $('#sPokeWrap').hidden = !S.current; if (S.current) $('#sPokeName').textContent = S.current.name; else $('#sPoke').checked = false;
     if (!SS.loaded) { SS.loaded = true; loadSets(); }
     loadSealed();
   }
-  if (location.hash !== (m === 'sealed' ? '#sealed' : '') ) history.replaceState(null, '', location.pathname + location.search + (m === 'sealed' ? '#sealed' : ''));
+  const h = m === 'sealed' ? '#sealed' : m === 'find' ? '#find' : '';
+  if (location.hash !== h) history.replaceState(null, '', location.pathname + location.search + h);
 }
 $('#modes').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setMode(b.dataset.m); });
 $('#toSealed').addEventListener('click', () => { $('#sPoke').checked = true; $('#sSet').value = ''; setMode('sealed'); window.scrollTo({ top: 0 }); });
@@ -428,7 +500,7 @@ async function loadSealed() {
 function sealedFiltered() {
   let l = SS.items.slice(); if ($('#sPriced').checked) l = l.filter(x => sPrice(x) != null);
   const d = x => x.set.released ? Date.parse(x.set.released) : 0;
-  const sorts = { price: (a, b) => sHasMarket(b) - sHasMarket(a) || (sPrice(b) ?? -1) - (sPrice(a) ?? -1), priceAsc: (a, b) => (sPrice(a) ?? 1e12) - (sPrice(b) ?? 1e12), newest: (a, b) => d(b) - d(a), oldest: (a, b) => (d(a) || 1e15) - (d(b) || 1e15) };
+  const sorts = { price: (a, b) => (sPrice(b) ?? -1) - (sPrice(a) ?? -1), priceAsc: (a, b) => (sPrice(a) ?? 1e12) - (sPrice(b) ?? 1e12), newest: (a, b) => d(b) - d(a), oldest: (a, b) => (d(a) || 1e15) - (d(b) || 1e15) };
   return l.sort(sorts[$('#sSort').value]);
 }
 function renderSealedAll() { renderSealedStats(); renderSealedChart(); renderSealedGrid(); }
@@ -501,4 +573,5 @@ function openSealed(x) {
   const l = params.get('lang'); if (l) { const b = $(`#langs [data-l="${l}"]`); if (b) b.click(); }
   const n = params.get('pokemon'); if (n) await choose(S.pokemon.find(p => p.name.toLowerCase() === n.toLowerCase()));
   if (location.hash === '#sealed') setMode('sealed');
+  else if (location.hash === '#find') setMode('find');
 })();

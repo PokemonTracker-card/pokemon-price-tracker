@@ -73,4 +73,39 @@ async function verifyPassword(pw, stored) {
   return crypto.timingSafeEqual(Buffer.from(hex, 'hex'), Buffer.from(again, 'hex'));
 }
 
-module.exports = { ROOT, DATA, CACHE, HIST, UA, TCGCSV, TCGDEX, CATEGORIES, sleep, getJSON, getText, readJSON, writeJSON, cacheFile, groupPrices, tcgdexCard, ext, hashPassword, verifyPassword };
+// ---------- EUR -> USD (Cardmarket prices are EUR; the site shows everything in USD) ----------
+// Free daily ECB reference rate via Frankfurter (no key). Cached 24h in memory + file; constant fallback if unreachable.
+const FX_FALLBACK = 1.12;
+const fx = { rate: null, date: null, source: null, at: 0, loading: null };
+function fxNow() {
+  if (!fx.rate) { const f = readJSON(path.join(CACHE, 'fx-eurusd.json'), null); if (f?.rate) Object.assign(fx, f); }
+  return fx.rate ? { rate: fx.rate, date: fx.date, source: fx.source } : { rate: FX_FALLBACK, date: null, source: 'fallback constant (rate service unreachable)' };
+}
+async function eurUsd() {
+  if (fx.rate && Date.now() - fx.at < 864e5) return fxNow();
+  if (!fx.loading) fx.loading = (async () => {
+    const f = readJSON(path.join(CACHE, 'fx-eurusd.json'), null, 864e5);
+    if (f?.rate) { Object.assign(fx, f); return; }
+    for (const url of ['https://api.frankfurter.dev/v1/latest?base=EUR&symbols=USD', 'https://api.frankfurter.app/latest?from=EUR&to=USD']) {
+      try {
+        const j = await getJSON(url, { retries: 1, timeout: 8000 });
+        const r = +j?.rates?.USD;
+        if (r > 0.5 && r < 3) { Object.assign(fx, { rate: r, date: j.date, source: 'ECB reference rate via frankfurter.dev', at: Date.now() }); writeJSON(path.join(CACHE, 'fx-eurusd.json'), { rate: fx.rate, date: fx.date, source: fx.source, at: fx.at }); return; }
+      } catch {}
+    }
+    if (fx.rate) fx.at = Date.now() - 864e5 + 3600e3; // keep the stale rate, retry in an hour
+  })().finally(() => { fx.loading = null; });
+  await fx.loading;
+  return fxNow();
+}
+// Convert a Cardmarket price block (EUR) to USD. Keeps eurRate so the UI can say "converted from EUR".
+const CM_PRICE_KEYS = /^(avg|low|trend|avg1|avg7|avg30|current)(-holo)?$/;
+function cmUsd(cm, rate = fxNow().rate) {
+  if (!cm) return cm;
+  if (cm.unit === 'USD' && cm.fromEur) return cm;
+  const out = { ...cm };
+  for (const [k, v] of Object.entries(cm)) if (CM_PRICE_KEYS.test(k) && typeof v === 'number') out[k] = Math.round(v * rate * 100) / 100;
+  return Object.assign(out, { unit: 'USD', fromEur: true, eurRate: rate });
+}
+
+module.exports = { FX_FALLBACK, fxNow, eurUsd, cmUsd, ROOT, DATA, CACHE, HIST, UA, TCGCSV, TCGDEX, CATEGORIES, sleep, getJSON, getText, readJSON, writeJSON, cacheFile, groupPrices, tcgdexCard, ext, hashPassword, verifyPassword };
