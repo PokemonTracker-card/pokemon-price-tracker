@@ -132,3 +132,7 @@ form input{width:100%}
 .typebadge{color:#a5b4fc}
 .pokehead .btn{white-space:nowrap}
 @media (max-width:760px){.pokehead{flex-wrap:wrap}.modes button{padding:8px 12px;font-size:13.5px}}
+.alertform .pm,.alertform .tm{display:inline-flex;gap:6px;align-items:center}
+.alertform .pm[hidden],.alertform .tm[hidden]{display:none}
+.alertform input[name=percent]{width:72px}
+.alertform .aq{flex-basis:100%;line-height:1.5}

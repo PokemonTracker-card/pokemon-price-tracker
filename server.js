@@ -7,7 +7,8 @@ const path = require('path');
 const crypto = require('crypto');
 const L = require('./lib');
 const { createStore } = require('./store');
-const { checkAlerts } = require('./alerts');
+const AL = require('./alerts');
+const { checkAlerts } = AL;
 
 const PORT = +process.env.PORT || 8787;
 const PROD = process.env.NODE_ENV === 'production';
@@ -390,6 +391,18 @@ function currentFor(a) {
   return null;
 }
 
+// Current price + average + trigger for an alert (or an alert-to-be). `cm` = already-fetched Cardmarket block (tcgdex).
+function quoteFor(a, cm) {
+  let current, avg;
+  if (a.source === 'tcgdex') {
+    if (cm === undefined) cm = L.readJSON(L.cacheFile(`tcgdex-${a.language}-${String(a.tcgdexId).replace(/[^\w.-]/g, '_')}.json`), null)?.pricing?.cardmarket;
+    current = AL.cmCurrent(cm); avg = AL.cmAverage(cm);
+  } else { current = currentFor(a); avg = AL.historyAverage(histPoints(`${a.productId}|${a.subType}`)); }
+  const ev = AL.evaluate(a, current, avg);
+  return { current, average: avg.average, averageBasis: avg.averageBasis, averageDays: avg.averageDays, averageLimited: avg.averageLimited,
+    mode: ev.mode, percent: ev.percent, triggerPrice: ev.triggerPrice, percentOfAverage: ev.percentOfAverage, triggered: ev.hit };
+}
+
 // ---------- HTTP helpers ----------
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
 function send(res, code, body, type = 'application/json', headers = {}) {
@@ -450,7 +463,8 @@ const server = http.createServer(async (req, res) => {
         const mark = ['1', 'true', 'yes'].includes(String(u.searchParams.get('markNotified')).toLowerCase());
         alertCheckRunning = true;
         try {
-          const hits = await checkAlerts(store, { markNotified: mark, onError: (a, e) => log(`alert ${a.id} price lookup failed: ${e.message}`) });
+          const historyPoints = async key => { await ensureHistory(); return histPoints(key); };
+          const hits = await checkAlerts(store, { markNotified: mark, historyPoints, onError: (a, e) => log(`alert ${a.id} price lookup failed: ${e.message}`) });
           log(`admin alert check: ${hits.length} hit(s), markNotified=${mark}`);
           return send(res, 200, hits, 'application/json', { 'X-Mark-Notified': mark ? '1' : '0' });
         } finally { alertCheckRunning = false; }
@@ -521,17 +535,41 @@ const server = http.createServer(async (req, res) => {
         user.favorites = (user.favorites || []).filter(f => f !== name); if (b.on) user.favorites.unshift(name);
         await saveUser(user); return send(res, 200, { user: publicUser(user) });
       }
+      // Preview for the alert form: current price, 30-day average and its basis, and the trigger at a given percent.
+      if (p === '/api/alerts/quote') {
+        const q = Object.fromEntries(u.searchParams);
+        const pct = Number(q.percent) > 0 ? Number(q.percent) : AL.DEFAULT_PERCENT;
+        let a, cm;
+        if (q.source === 'tcgdex') {
+          const lang = ['zh-tw', 'zh-cn'].includes(q.lang) ? q.lang : null;
+          const c = lang && await L.tcgdexCard(lang, String(q.tcgdexId || '')).catch(() => null);
+          if (!c) return send(res, 404, { error: 'Unknown card' });
+          a = { source: 'tcgdex', language: lang, tcgdexId: c.id, currency: 'EUR' }; cm = c.pricing?.cardmarket || null;
+        } else {
+          const kind = ['card', 'pack', 'sealed'].includes(q.kind) ? q.kind : 'card', id = +q.productId;
+          const rows = kind === 'pack' ? null : kind === 'sealed' ? state.sealedById?.get(id)?.prices : state.byId.get(id)?.prices;
+          const sub = kind === 'pack' ? state.packById?.get(id)?.sub ?? null : ((rows || []).find(x => x.sub === q.subType) || (rows || [])[0])?.sub ?? null;
+          a = { source: 'tcgcsv', kind, productId: id, subType: sub, currency: 'USD' };
+          await withHistory();
+        }
+        return send(res, 200, { ...quoteFor({ ...a, mode: 'percent', percent: pct }, cm), currency: a.currency, subType: a.subType ?? null });
+      }
       if (p === '/api/alerts') {
         if (!user) return send(res, 401, { error: 'Log in to use price alerts' });
         const all = Object.values(await store.all('alerts'));
         if (req.method === 'GET') {
-          const mine = all.filter(a => a.profile === user.username).map(a => ({ ...a, current: currentFor(a) }));
+          await withHistory();
+          const mine = all.filter(a => a.profile === user.username).map(a => ({ ...a, ...quoteFor(a) }));
           return send(res, 200, { alerts: mine });
         }
         if (req.method === 'POST') {
           const b = await readBody(req);
-          const target = Number(b.target);
-          if (!(target > 0)) return send(res, 400, { error: 'Enter a target price above 0' });
+          const mode = b.mode === 'target' ? 'target' : 'percent';
+          const target = mode === 'target' ? Number(b.target) : null;
+          const percent = mode === 'percent' ? (b.percent == null || b.percent === '' ? AL.DEFAULT_PERCENT : Number(b.percent)) : null;
+          if (mode === 'target' && !(target > 0)) return send(res, 400, { error: 'Enter a target price above 0' });
+          if (mode === 'percent' && !(percent >= 1 && percent <= 99)) return send(res, 400, { error: 'Percent of average must be between 1 and 99' });
+          const rule = { mode, target, percent: percent == null ? null : Math.round(percent * 10) / 10 };
           let item;
           if (b.source === 'tcgdex') {
             const lang = ['zh-tw', 'zh-cn'].includes(b.lang) ? b.lang : null;
@@ -555,9 +593,11 @@ const server = http.createServer(async (req, res) => {
             item = { kind: 'card', source: 'tcgcsv', category: g.cat, groupId: g.groupId, productId: c.id, subType: sub, name: c.name, set: g.name, language: g.lang, currency: 'USD', priceField: 'TCGplayer market (mid if no market)', url: c.url, img: c.img };
           }
           const existing = all.find(a => a.profile === user.username && a.source === item.source && (item.source === 'tcgdex' ? a.tcgdexId === item.tcgdexId : a.productId === item.productId && a.subType === item.subType && a.kind === item.kind));
-          if (existing) await store.put('alerts', existing.id, { ...existing, target, notified: false, updatedAt: new Date().toISOString() });
-          else { const id = crypto.randomBytes(6).toString('hex'); await store.put('alerts', id, { id, profile: user.username, ...item, target, notified: false, createdAt: new Date().toISOString() }); }
-          return send(res, 200, { ok: true });
+          let saved;
+          if (existing) await store.put('alerts', existing.id, saved = { ...existing, ...rule, notified: false, updatedAt: new Date().toISOString() });
+          else { const id = crypto.randomBytes(6).toString('hex'); await store.put('alerts', id, saved = { id, profile: user.username, ...item, ...rule, notified: false, createdAt: new Date().toISOString() }); }
+          await withHistory();
+          return send(res, 200, { ok: true, alert: { ...saved, ...quoteFor(saved) } });
         }
         if (req.method === 'DELETE') {
           const id = u.searchParams.get('id');

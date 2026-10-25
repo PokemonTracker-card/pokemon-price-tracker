@@ -195,11 +195,34 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') document.que
 
 function alertForm(kind, c, variants) {
   if (!S.user) return `<div class="muted small">Log in to set a price alert. <a href="#" data-login>Log in</a></div>`;
+  const sym = kind === 'card' && c.source === 'tcgdex' ? '€' : '$';
   return `<form class="alertform" data-kind="${kind}" data-id="${esc(kind === 'pack' ? c.pack.id : (c.source === 'tcgdex' ? c.tcgdexId : c.id))}" data-src="${esc(c.source || 'tcgcsv')}" data-lang="${esc(c.lang)}">
     ${variants && variants.length > 1 ? `<select name="sub">${variants.map(v => `<option>${esc(v)}</option>`).join('')}</select>` : ''}
-    <span class="muted small">Alert me at or below</span><input name="target" type="number" min="0.01" step="0.01" required placeholder="${kind === 'card' && c.source === 'tcgdex' ? '€' : '$'} target">
-    <button class="btn sm" type="submit">🔔 Set alert</button></form>`;
+    <select name="mode" title="Alert type"><option value="percent" selected>Below % of 30-day avg</option><option value="target">At/below fixed price</option></select>
+    <span class="pm"><input name="percent" type="number" min="1" max="99" step="1" value="75" required aria-label="Percent of average"><span class="muted small">% of avg</span></span>
+    <span class="tm" hidden><input name="target" type="number" min="0.01" step="0.01" placeholder="${sym} target" aria-label="Target price"></span>
+    <button class="btn sm" type="submit">🔔 Set alert</button>
+    <div class="aq muted small">Loading 30-day average…</div></form>`;
 }
+// Fetch current price + average and show the trigger price for the alert form.
+async function refreshQuote(f) {
+  const isPct = f.mode.value === 'percent';
+  f.querySelector('.pm').hidden = !isPct; f.querySelector('.tm').hidden = isPct;
+  f.percent.required = isPct; f.target.required = !isPct;
+  const q = new URLSearchParams({ kind: f.dataset.kind, percent: f.percent.value || 75 });
+  if (f.dataset.src === 'tcgdex' && f.dataset.kind === 'card') { q.set('source', 'tcgdex'); q.set('tcgdexId', f.dataset.id); q.set('lang', f.dataset.lang); }
+  else { q.set('productId', f.dataset.id); if (f.sub) q.set('subType', f.sub.value); }
+  const box = f.querySelector('.aq'); const seq = (f._seq = (f._seq || 0) + 1);
+  try {
+    const r = await api(`/api/alerts/quote?${q}`); if (seq !== f._seq) return;
+    const cur = r.currency;
+    const avg = r.average != null ? `30-day avg <b>${fmt(r.average, cur)}</b> <span title="${esc(r.averageBasis)}">(${esc(r.averageBasis)})</span>` : `No average yet (${esc(r.averageBasis)})`;
+    const trig = isPct ? (r.triggerPrice != null ? ` · alert when below <b>${fmt(r.triggerPrice, cur)}</b> (${esc(f.percent.value || 75)}% of avg)` : ' · can\u2019t compute a trigger until an average exists')
+      : (+f.target.value > 0 ? ` · alert at or below <b>${fmt(+f.target.value, cur)}</b>` : '');
+    box.innerHTML = `Now <b>${fmt(r.current, cur)}</b>${r.percentOfAverage != null ? ` (${r.percentOfAverage}% of avg)` : ''} · ${avg}${trig}`;
+  } catch (e) { if (seq === f._seq) box.textContent = `Couldn't load the average: ${e.message}`; }
+}
+function initAlertForms() { document.querySelectorAll('#cardBody .alertform').forEach(refreshQuote); }
 async function openCard(c) {
   miniCharts.forEach(ch => ch.destroy()); miniCharts = [];
   const cur = cardCur(c);
@@ -233,7 +256,7 @@ async function openCard(c) {
       </div>
       <div class="box"><h4>Price trend</h4><div id="trendArea" class="muted small">Loading Cardmarket averages…</div></div>
     </div></div>`;
-  openModal('#cardModal');
+  openModal('#cardModal'); initAlertForms();
   // Trend: Cardmarket 30/7/1-day averages + our own recorded daily TCGplayer snapshots
   const area = $('#trendArea');
   let cm = null;
@@ -264,11 +287,18 @@ async function openCard(c) {
   }
 }
 $('#cardBody').addEventListener('click', e => { if (e.target.closest('[data-login]')) { e.preventDefault(); showAuth('login'); } });
+$('#cardBody').addEventListener('change', e => { const f = e.target.closest('.alertform'); if (f) refreshQuote(f); });
+$('#cardBody').addEventListener('input', e => { const f = e.target.closest('.alertform'); if (f && (e.target.name === 'percent' || e.target.name === 'target')) { clearTimeout(f._t); f._t = setTimeout(() => refreshQuote(f), 250); } });
 $('#cardBody').addEventListener('submit', async e => {
   const f = e.target.closest('.alertform'); if (!f) return; e.preventDefault();
-  const body = { kind: f.dataset.kind, target: +f.target.value, subType: f.sub?.value };
+  const body = { kind: f.dataset.kind, mode: f.mode.value, subType: f.sub?.value };
+  if (body.mode === 'percent') body.percent = +f.percent.value; else body.target = +f.target.value;
   if (f.dataset.src === 'tcgdex' && f.dataset.kind === 'card') Object.assign(body, { source: 'tcgdex', tcgdexId: f.dataset.id, lang: f.dataset.lang }); else body.productId = +f.dataset.id;
-  try { await api('/api/alerts', { method: 'POST', body: JSON.stringify(body) }); toast(S.user.email ? `Alert saved — we'll email ${S.user.email}` : 'Alert saved — add an alert email in your profile'); loadAlerts(); }
+  try {
+    const r = await api('/api/alerts', { method: 'POST', body: JSON.stringify(body) }); const a = r.alert || {};
+    const rule = a.mode === 'percent' ? (a.triggerPrice != null ? ` (below ${fmt(a.triggerPrice, a.currency)} = ${a.percent}% of avg)` : ` (below ${a.percent}% of avg once an average exists)`) : '';
+    toast((S.user.email ? `Alert saved${rule} — we'll email ${S.user.email}` : `Alert saved${rule} — add an alert email in your profile`)); loadAlerts();
+  }
   catch (err) { toast(err.message); }
 });
 
@@ -316,8 +346,11 @@ async function loadAlerts() {
     $('#alertList').innerHTML = r.alerts.map(a => `<div class="al">${a.img ? `<img src="${esc(a.img)}" alt="">` : '<img alt="">'}
       <div class="grow"><div class="t">${esc(a.name)}${a.subType ? ` <span class="muted small">(${esc(a.subType)})</span>` : ''}</div>
       <div class="muted small">${esc(a.set)} · ${LANGNAME[a.language] || esc(a.language)} · ${a.kind === 'sealed' ? 'sealed' + (a.sealedType ? ' · ' + esc(a.sealedType) : '') : a.kind}</div>
-      <div class="small">Now <b class="${a.current != null && a.current <= a.target ? 'hit' : ''}">${fmt(a.current, a.currency)}</b> · target ${fmt(a.target, a.currency)}${a.notified ? ' · <span class="hit">alert sent</span>' : ''}</div></div>
-      ${a.url ? `<a class="btn ghost sm" href="${esc(a.url)}" target="_blank" rel="noopener">↗</a>` : ''}<button class="btn ghost sm" data-del="${esc(a.id)}">Remove</button></div>`).join('') || '<div class="muted">No alerts yet — open any card and set a target price.</div>';
+      <div class="small">Now <b class="${a.triggered ? 'hit' : ''}">${fmt(a.current, a.currency)}</b>${a.mode === 'percent'
+        ? ` · avg ${fmt(a.average, a.currency)} · alert below <b>${fmt(a.triggerPrice, a.currency)}</b> (${a.percent}% of avg)`
+        : ` · target ${fmt(a.target, a.currency)}${a.average != null ? ` · avg ${fmt(a.average, a.currency)}` : ''}`}${a.notified ? ' · <span class="hit">alert sent</span>' : ''}</div>
+      <div class="muted small" title="${esc(a.averageBasis || '')}">Average: ${esc(a.averageBasis || '—')}${a.percentOfAverage != null ? ` · now ${a.percentOfAverage}% of avg` : ''}</div></div>
+      ${a.url ? `<a class="btn ghost sm" href="${esc(a.url)}" target="_blank" rel="noopener">↗</a>` : ''}<button class="btn ghost sm" data-del="${esc(a.id)}">Remove</button></div>`).join('') || '<div class="muted">No alerts yet — open any card, pack or sealed product and set an alert (default: below 75% of its 30-day average).</div>';
   } catch {}
 }
 function openAlerts() { $('#profileForm').email.value = S.user.email || ''; $('#profileMsg').textContent = ''; loadAlerts(); openModal('#alertsModal'); }
@@ -453,7 +486,7 @@ function openSealed(x) {
     <div class="box"><h4>Price history</h4>${days.size >= 2 ? '<div class="minichart"><canvas id="histChart"></canvas></div><div class="muted small">Daily TCGplayer market price recorded by this site.</div>'
       : `<div class="muted small">TCGplayer doesn't publish price history and the TCGCSV archive is offline, so this site records its own daily snapshot (since ${esc((S.status?.historyDays || [])[0] || 'today')}). A line chart appears here once 2+ days are recorded.</div>`}</div>
   </div></div>`;
-  openModal('#cardModal');
+  openModal('#cardModal'); initAlertForms();
   if (days.size >= 2) { const labels = [...days].sort(); const colors = ['#facc15', '#60a5fa', '#22c55e'];
     miniCharts.push(new Chart($('#histChart'), { type: 'line', data: { labels, datasets: hist.map((h, i) => ({ label: h.sub, data: labels.map(d => h.points.find(p => p.d === d)?.m ?? null), borderColor: colors[i % 3], tension: .25, spanGaps: true })) },
       options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#e7eaf3' } } }, scales: { x: { ticks: { color: '#8b93ab' } }, y: { ticks: { color: '#8b93ab', callback: v => fmt(v) }, grid: { color: '#1f2435' } } } } })); }

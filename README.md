@@ -52,9 +52,24 @@ Two equivalent ways to get alert hits (neither sends email):
   503 token not configured or server still starting, 409 if a check is already running.
 - CLI (same store via `DATABASE_URL`/`DATA_DIR`): `node check_alerts.js` (marks notified) or `node check_alerts.js --dry-run`.
 
-Output: JSON array of alerts at/below target. Hits are marked notified and re-armed automatically once the
-price goes back above target. Each item: alertId, profile, email, kind (card|pack|sealed), productType, name, set,
-language, variant, currentPrice, target, currency, priceField, link, image, pricesUpdated.
+Alert modes (chosen per alert in the UI; `POST /api/alerts` body `{kind, productId|tcgdexId, subType, mode, percent|target}`):
+- `percent` (default, 75%): fires when the current price drops **below** `percent`% of the 30-day average.
+  - Cardmarket-priced items (Chinese cards via TCGdex): average = Cardmarket `avg30` (falls back to `avg7`/`avg1`, labeled).
+  - TCGplayer-priced items (EN/JP cards, packs, sealed): average = mean of the site's own recorded daily TCGplayer market
+    price over the last 30 days. With fewer than 7 recorded days it still uses the days available and labels it
+    (`site history, only N days (limited: fewer than 7)`, `averageLimited: true`; TCGplayer's market price is itself a
+    recent-sales average, so it's the best available baseline). With no history, no trigger.
+  - Site history only accumulates if storage persists (`DATABASE_URL`); on JSON storage Render wipes it on every restart.
+- `target`: fires when the current price is at or below a fixed price (alerts created before modes existed are `target`).
+`GET /api/alerts/quote?kind=&productId=&subType=&percent=` (or `source=tcgdex&tcgdexId=&lang=`) previews current, average,
+averageBasis and triggerPrice for the form.
+
+Output: JSON array of newly-hit alerts. Hits are marked notified and re-armed automatically once the
+price goes back above the trigger. Each item: alertId, profile, email, kind (card|pack|sealed), productType, name, set,
+language, variant, mode (percent|target), currentPrice, average, averageBasis (e.g. "Cardmarket 30-day avg",
+"site history, 12 days"), averageDays, averageLimited, percentOfAverage (current as % of average), triggerPercent
+(the alert's % setting, null for target mode), triggerPrice, target (= triggerPrice, kept for compatibility), currency,
+priceField, link, image, pricesUpdated.
 
 Scheduled daily at 4:30 PM ET by the owner; TCGCSV refreshes ~20:00 UTC (4 PM EDT / 3 PM EST), so that run sees same-day prices.
 

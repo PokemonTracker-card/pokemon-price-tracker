@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Prints a JSON array of price alerts that are now at/below target and haven't been reported yet,
+// Prints a JSON array of price alerts that newly hit (below N% of 30-day avg, or at/below a fixed target) and haven't been reported yet,
 // then marks them notified (re-arming alerts whose price went back above target). Sends nothing itself.
 // Uses the same storage as the site: Postgres when DATABASE_URL is set, else local data/*.json.
 //   node check_alerts.js            -> check + mark notified
