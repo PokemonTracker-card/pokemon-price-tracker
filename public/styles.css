@@ -143,3 +143,6 @@ form input{width:100%}
 .search #fBtn{margin-left:6px;flex:none}
 table.gt tr.hl td{background:#2a2410;color:var(--accent)}
 table.gt td:first-child{white-space:nowrap}
+.badge.ed1{background:linear-gradient(135deg,#111,#2b2b2b);color:#fff;border:1px solid #facc15;font-weight:800;left:auto;right:8px;top:auto;bottom:8px}
+.badge.ed1.inl{position:static;display:inline-block;vertical-align:middle;font-size:12px;padding:2px 7px;border-radius:6px}
+.edl{font-size:12px;color:#8b93ab;margin-top:2px}.edl.first{color:#facc15;font-weight:700}.edl.big{font-size:14px;margin:-4px 0 8px}

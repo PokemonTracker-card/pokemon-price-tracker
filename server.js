@@ -314,22 +314,51 @@ async function cardmarketTrend(productId, dexId) {
 }
 
 // ---------- search ----------
-function serializeCard(c) {
+function serializeCard(c, prices = c.prices) {
   const g = state.groupByKey.get(gkey(c.cat, c.groupId));
   return {
     id: c.id, source: 'tcgcsv', lang: c.lang, name: c.name, number: c.number, rarity: c.rarity, img: c.img, url: c.url,
     set: { id: g.groupId, cat: g.cat, name: g.name, abbr: g.abbr, released: g.published },
-    prices: c.prices, pack: state.packs.get(gkey(c.cat, c.groupId)) || null,
+    prices, pack: state.packs.get(gkey(c.cat, c.groupId)) || null,
     packNote: state.packs.has(gkey(c.cat, c.groupId)) ? null : 'No single booster pack is sold for this set (promo/deck/special product) or none is listed on TCGplayer',
     pull: pullInfo(c, g),
-    history: c.prices.map(p => ({ sub: p.sub, points: histPoints(`${c.id}|${p.sub}`) })),
+    history: prices.map(p => ({ sub: p.sub, points: histPoints(`${c.id}|${p.sub}`) })),
   };
+}
+// ---------- editions (WotC-era 1st Edition / Shadowless / Unlimited) ----------
+// TCGplayer keeps 1st Edition and Unlimited of the same card as separate price rows ("1st Edition Holofoil" vs "Unlimited Holofoil")
+// on one product. Base Set is split into two groups: "Base Set (Shadowless)" (1st Edition rows + Shadowless unlimited rows) and
+// "Base Set" (the later, shadowed Unlimited print). Each edition is shown as its own entry so 1st Edition prices aren't hidden.
+const edOf = sub => /^1st edition/i.test(sub || '') ? '1st' : /^unlimited/i.test(sub || '') ? 'unl' : null;
+function editionLabel(c, ed) {
+  const g = state.groupByKey.get(gkey(c.cat, c.groupId)); const shadowless = /shadowless/i.test(g?.name || '');
+  if (ed === '1st') return shadowless ? '1st Edition (Shadowless)' : '1st Edition';
+  if (ed === 'unl') return shadowless ? 'Shadowless (Unlimited)' : 'Unlimited';
+  if (c.cat === 3 && g?.name === 'Base Set') return 'Unlimited';
+  return null;
+}
+const famPrice = ps => { const m = ps.filter(p => p.market != null); if (m.length) return Math.max(...m.map(p => p.market)); const d = ps.filter(p => p.mid != null); return d.length ? Math.max(...d.map(p => p.mid)) : null; };
+function editionEntries(c, extra = {}) {
+  const has1st = c.prices.some(p => edOf(p.sub) === '1st');
+  if (!has1st) { const lab = editionLabel(c, c.prices.some(p => edOf(p.sub) === 'unl') ? 'unl' : null); return [{ ...serializeCard(c), ...extra, edition: lab ? 'unl' : null, editionLabel: lab, vkey: `${c.id}` }]; }
+  const fams = [['1st', c.prices.filter(p => edOf(p.sub) === '1st')], ['unl', c.prices.filter(p => edOf(p.sub) !== '1st')]].filter(f => f[1].length);
+  return fams.map(([ed, ps]) => ({
+    ...serializeCard(c, ps), ...extra, edition: ed, editionLabel: editionLabel(c, ed), vkey: `${c.id}:${ed}`,
+    otherEditions: fams.filter(f => f[0] !== ed).map(([e2, p2]) => ({ edition: e2, label: editionLabel(c, e2), price: famPrice(p2), subs: p2.map(p => p.sub) })),
+  }));
+}
+// "1st edition charizard", "charizard base set 1st", "unlimited" -> edition filter + the remaining words.
+function editionQuery(q) {
+  let ed = null;
+  q = String(q).replace(/\b(1st|first)(\s*(ed\.?|edition))?\b/gi, () => { ed = '1st'; return ' '; })
+    .replace(/\bunlimited\b/gi, () => { ed = ed || 'unl'; return ' '; }).replace(/\s+/g, ' ').trim();
+  return { q, ed };
 }
 async function search(name, langs) {
   const q = norm(name);
   if (q.trim().length < 2) return { cards: [], notes: [] };
   const want = new Set(langs);
-  const out = state.cards.filter(c => !c.t && want.has(c.lang) && c.n.includes(q)).map(serializeCard);
+  const out = state.cards.filter(c => !c.t && want.has(c.lang) && c.n.includes(q)).flatMap(c => editionEntries(c));
   const mk = c => Math.max(-1, ...c.prices.map(p => p.market ?? -1));
   const mid = c => Math.max(-1, ...c.prices.map(p => p.mid ?? -1));
   const pr = c => { const m = mk(c); return m >= 0 ? m : mid(c); };
@@ -476,7 +505,9 @@ async function chineseCardSearch(q, toks, langs, notes) {
   if (out.length) notes.push('Chinese cards come from TCGdex: names and set names are in Chinese, so English set names can’t filter them — use the card number or set code.');
   return out;
 }
-async function cardSearch(q, langs, { zh = false, limit = 60, sort = 'price' } = {}) {
+async function cardSearch(q0, langs, { zh = false, limit = 60, sort = 'price' } = {}) {
+  const { q, ed } = editionQuery(q0);
+  const outLimit = limit; if (ed) limit = 600;
   const toks = parseQuery(q);
   const notes = [];
   const cjk = CJK.test(q);
@@ -489,9 +520,15 @@ async function cardSearch(q, langs, { zh = false, limit = 60, sort = 'price' } =
     for (let k = 0; k < toks.length; k++) { const rr = indexCardSearch(toks.filter((_, j) => j !== k), want, limit, sort); if (rr.total && (!best || rr.maxScore > best.r.maxScore)) best = { r: rr, dropped: toks[k].t }; }
     if (best) { r = best.r; notes.push(`No card matches every word — showing matches without “${best.dropped}”.`); }
   }
-  const cards = r.hits.map(h => { const c = state.cards[h.i]; return { ...serializeCard(c), dexId: dexFor(c), kind: c.t ? 'trainer' : 'pokemon' }; });
+  let cards = r.hits.flatMap(h => { const c = state.cards[h.i]; return editionEntries(c, { dexId: dexFor(c), kind: c.t ? 'trainer' : 'pokemon' }); });
+  if (ed) {
+    cards = cards.filter(c => c.edition === ed);
+    r = { ...r, total: cards.length };
+    notes.push(cards.length ? `Showing ${ed === '1st' ? '1st Edition' : 'Unlimited'} printings only.` : `No ${ed === '1st' ? '1st Edition' : 'Unlimited'} printing matches — 1st Edition exists for Wizards of the Coast-era English sets (1999–2003) and some Japanese sets.`);
+    cards = cards.slice(0, outLimit);
+  }
   const zhLangs = langs.filter(l => l.startsWith('zh'));
-  if (zh && zhLangs.length && !/^\s*[a-z]{0,5}\d+\s*\/\s*[a-z]{0,5}\d+\s*$/i.test(q)) cards.push(...await chineseCardSearch(q, toks, zhLangs, notes));
+  if (zh && zhLangs.length && !ed && !/^\s*[a-z]{0,5}\d+\s*\/\s*[a-z]{0,5}\d+\s*$/i.test(q)) cards.push(...await chineseCardSearch(q, toks, zhLangs, notes));
   if (sort !== 'match') { const pr = c => c.source === 'tcgdex' ? (c.cardmarket?.current ?? -1) : Math.max(-1, ...c.prices.map(p => p.market ?? p.mid ?? -1)); cards.sort((a, b) => pr(b) - pr(a)); }
   return { total: r.total, cards, notes };
 }
@@ -508,45 +545,71 @@ async function cardpriceJSON(pathname) {
   try { return await L.getJSON(`https://api.cardprice.com${pathname}`, { retries: 1, timeout: 12000 }); } finally { gradedRelease(); }
 }
 const GRADE_ROWS = [['psa10', 'PSA 10', 'psa'], ['bgs10', 'BGS 10', 'bgs'], ['cgc10', 'CGC 10', 'cgc'], ['sgc10', 'SGC 10', 'sgc'], ['grade95', 'Grade 9.5', null], ['grade9', 'Grade 9', null], ['grade8', 'Grade 8', null], ['grade7', 'Grade 7', null], ['ungraded', 'Ungraded (raw)', null]];
-async function gradedFor(productId) {
-  const id = +productId;
+// CardPrice card record for a TCGplayer product, trimmed to what we use (cached 24h, incl. misses).
+async function cardpriceCard(id) {
   const hit = gradedCache.get(id);
-  if (hit && Date.now() - hit.at < GRADED_TTL) return hit.r;
+  if (hit && Date.now() - hit.at < GRADED_TTL) return hit.card;
   if (gradedInflight.has(id)) return gradedInflight.get(id);
   const job = (async () => {
-    const c = state.byId.get(id);
-    let r;
     const prod = await cardpriceJSON(`/api/product/${id}`);
     const cardId = prod?.product?.card_id;
-    const card = cardId ? await cardpriceJSON(`/api/card/${encodeURIComponent(cardId)}`) : null;
+    const full = cardId ? await cardpriceJSON(`/api/card/${encodeURIComponent(cardId)}`) : null;
+    const card = full?.card ? { card: { id: full.card.id, name: full.card.name, slug: full.card.slug }, variants: (full.variants || []).filter(v => +v.productId === id).map(v => ({ printing: v.printing, label: v.label, subType: v.subType })),
+      gradedPrintings: full.gradedPrintings, graded: full.graded, population: full.population } : null;
+    if (gradedCache.size >= GRADED_MAX) gradedCache.delete(gradedCache.keys().next().value);
+    gradedCache.set(id, { at: Date.now(), card });
+    return card;
+  })().finally(() => gradedInflight.delete(id));
+  gradedInflight.set(id, job);
+  return job;
+}
+// Which CardPrice "printing" a TCGplayer variant is: 1st Edition rows map to CardPrice's "1st Edition" printing,
+// otherwise the variant's own printing (e.g. "Shadowless") if CardPrice grades it separately, else the base ("") printing.
+function cpPrintingFor(v, printings) {
+  const is1st = /1st edition/i.test(`${v.subType || ''} ${v.label || ''}`);
+  if (is1st) return printings.find(p => /1st edition/i.test(p) && v.printing && p.includes(v.printing)) || printings.find(p => /^1st edition$/i.test(p)) || printings.find(p => /1st edition/i.test(p)) || null;
+  if (v.printing && printings.includes(v.printing)) return v.printing;
+  return printings.includes('') ? '' : null;
+}
+async function gradedFor(productId, subType = null) {
+  const id = +productId;
+  const c = state.byId.get(id);
+  const card = await cardpriceCard(id);
+  const ed = edOf(subType);
+  let r;
+  {
     if (!card?.card) r = { available: false, reason: 'CardPrice has no record of this exact TCGplayer product yet.' };
     else {
-      const mine = (card.variants || []).filter(v => +v.productId === id);
-      const wanted = new Set(mine.map(v => v.printing ?? ''));
       let rows = (card.gradedPrintings?.length ? card.gradedPrintings : card.graded ? [card.graded] : []).filter(Boolean);
-      let note = null;
+      const names = rows.map(g => g.printing ?? '');
+      const mine = card.variants.filter(v => !subType || v.subType === subType);
+      const vs = mine.length ? mine : card.variants;
+      const wanted = new Set(vs.map(v => cpPrintingFor(v, names)).filter(x => x != null));
+      let note = null, editionMatched = null;
       const matched = rows.filter(g => wanted.has(g.printing ?? ''));
-      if (matched.length) rows = matched; else if (rows.length > 1) note = 'CardPrice lists several printings for this card; showing all of them.';
-      const pop = (card.population || []).filter(p => !wanted.size || wanted.has(p.printing ?? '') || !matched.length);
+      if (ed === '1st') {
+        const first = matched.filter(g => /1st edition/i.test(g.printing || ''));
+        if (first.length) { rows = first; editionMatched = true; }
+        else { editionMatched = false; note = 'CardPrice does not separate 1st Edition graded sales for this card — the prices below are NOT 1st Edition-specific. Check the 1st Edition links below.'; if (matched.length) rows = matched; }
+      } else if (matched.length) rows = matched;
+      else if (rows.length > 1) note = 'CardPrice lists several printings for this card; showing all of them.';
+      const shown = new Set(rows.map(g => g.printing ?? ''));
+      const pop = (card.population || []).filter(p => shown.has(p.printing ?? '') || (!matched.length && editionMatched !== false));
       const printings = rows.map(g => ({
         printing: g.printing || null, date: g.date,
         grades: GRADE_ROWS.map(([k, label, co]) => ({ key: k, label, company: co, price: typeof g[k] === 'number' ? g[k] : null })).filter(x => x.price != null),
       })).filter(p => p.grades.some(x => x.key !== 'ungraded'));
       r = printings.length || pop.length ? {
         available: printings.length > 0, reason: printings.length ? null : 'CardPrice has population data but no graded sale prices for this card yet.',
-        note, cardId: card.card.id, name: card.card.name, printings,
+        note, edition: ed, editionMatched, cardId: card.card.id, name: card.card.name, printings,
         population: pop.map(p => ({ printing: p.printing || null, company: p.company, total: p.total, gem: p.gem, dist: p.dist, updated: p.updated_at })),
         source: { name: 'CardPrice', url: card.card.slug ? `https://cardprice.com/card/${card.card.slug}` : 'https://cardprice.com' },
         currency: 'USD',
       } : { available: false, reason: 'No graded sales recorded for this card on CardPrice yet.', source: card.card.slug ? { name: 'CardPrice', url: `https://cardprice.com/card/${card.card.slug}` } : null };
     }
-    if (c && !r.available) r.hint = c.lang === 'ja' ? 'Japanese cards are graded less often, so many have no tracked graded sales.' : null;
-    if (gradedCache.size >= GRADED_MAX) gradedCache.delete(gradedCache.keys().next().value);
-    gradedCache.set(id, { at: Date.now(), r });
-    return r;
-  })().finally(() => gradedInflight.delete(id));
-  gradedInflight.set(id, job);
-  return job;
+  }
+  if (c && !r.available) r.hint = c.lang === 'ja' ? 'Japanese cards are graded less often, so many have no tracked graded sales.' : null;
+  return r;
 }
 
 const sealedPrice = x => { const ps = x.prices.filter(p => p.market != null); if (ps.length) return ps[0].market; const m = x.prices.find(p => p.mid != null); return m ? m.mid : null; };
@@ -701,7 +764,7 @@ const server = http.createServer(async (req, res) => {
       if (p === '/api/graded') {
         const id = +u.searchParams.get('productId');
         if (!id || !state.byId.has(id)) return send(res, 404, { available: false, reason: 'Unknown card' });
-        try { return send(res, 200, await gradedFor(id)); }
+        try { return send(res, 200, await gradedFor(id, u.searchParams.get('subType') || null)); }
         catch (e) { log('graded lookup failed', id, e.message); return send(res, 200, { available: false, reason: 'CardPrice is not responding right now — try again in a bit.', temporary: true }); }
       }
       if (p === '/api/trend') return send(res, 200, await cardmarketTrend(u.searchParams.get('productId'), u.searchParams.get('dexId')));
@@ -806,7 +869,8 @@ const server = http.createServer(async (req, res) => {
             const c = state.byId.get(+b.productId); if (!c) return send(res, 400, { error: 'Unknown card' });
             const g = state.groupByKey.get(gkey(c.cat, c.groupId));
             const sub = (c.prices.find(x => x.sub === b.subType) || c.prices[0])?.sub || null;
-            item = { kind: 'card', source: 'tcgcsv', category: g.cat, groupId: g.groupId, productId: c.id, subType: sub, name: c.name, set: g.name, language: g.lang, currency: 'USD', priceField: 'TCGplayer market (mid if no market)', url: c.url, img: c.img };
+            const edl = editionLabel(c, edOf(sub));
+            item = { kind: 'card', source: 'tcgcsv', category: g.cat, groupId: g.groupId, productId: c.id, subType: sub, name: edl ? `${c.name} — ${edl}` : c.name, edition: edl, set: g.name, language: g.lang, currency: 'USD', priceField: 'TCGplayer market (mid if no market)', url: c.url, img: c.img };
           }
           const existing = all.find(a => a.profile === user.username && a.source === item.source && (item.source === 'tcgdex' ? a.tcgdexId === item.tcgdexId : a.productId === item.productId && a.subType === item.subType && a.kind === item.kind));
           let saved;

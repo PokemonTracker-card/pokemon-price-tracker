@@ -167,9 +167,9 @@ function cardTile(c, idx) {
     const pp = packPrice(c.pack);
     return `<article class="c" data-i="${idx}">
       <div class="img">${c.img ? `<img src="${esc(c.img)}" alt="${esc(c.name)}" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'noimg',textContent:'No image'}))">` : '<span class="noimg">No image</span>'}
-        <span class="badge">${LANG[c.lang]}</span>${c.kind === 'trainer' ? '<span class="badge t">Trainer/Energy</span>' : ''}${c.rarity ? `<span class="badge r">${esc(c.rarity)}</span>` : ''}</div>
+        <span class="badge">${LANG[c.lang]}</span>${c.edition === '1st' ? '<span class="badge ed1">1st Ed</span>' : ''}${c.kind === 'trainer' ? '<span class="badge t">Trainer/Energy</span>' : ''}${c.rarity && c.rarity !== 'None' ? `<span class="badge r">${esc(c.rarity)}</span>` : ''}</div>
       <div class="body">
-        <div class="name">${esc(c.name)}</div>
+        <div class="name">${esc(c.name)}</div>${c.editionLabel ? `<div class="edl ${c.edition === '1st' ? 'first' : ''}">${esc(c.editionLabel)}</div>` : ''}
         <div class="set">${esc(c.set.name)}${c.number ? ' · #' + esc(c.number) : ''}</div>
         ${pr != null ? `<div class="price">${fmt(pr, cur)}<small>${esc(priceLabel(c))}</small></div>` : '<div class="price na">No current price</div>'}
         <div class="pull">${c.pull?.known ? `🎲 ${esc(c.pull.tier)}: 1 in ${c.pull.tierOneIn} packs${c.pull.specificOneIn ? ` · this card ≈1 in ${c.pull.specificOneIn.toLocaleString()}` : ''}` : '<span class="muted">🎲 Pull rate unknown</span>'}</div>
@@ -236,7 +236,9 @@ async function openCard(c) {
   $('#cardBody').innerHTML = `<div class="detail">
     <div>${c.img ? `<img class="big" src="${esc(c.img.replace('_200w', '_in_1000x1000'))}" onerror="this.onerror=null;this.src='${esc(c.img)}'" alt="${esc(c.name)}">` : ''}</div>
     <div>
-      <h2>${esc(c.name)}</h2>
+      <h2>${esc(c.name)}${c.edition === '1st' ? ' <span class="badge ed1 inl">1st Ed</span>' : ''}</h2>
+      ${c.editionLabel ? `<div class="edl big ${c.edition === '1st' ? 'first' : ''}">${esc(c.editionLabel)} printing</div>` : ''}
+      ${(c.otherEditions || []).map(o => `<div class="muted small">Other printing of this card: <b>${esc(o.label)}</b> — ${o.price != null ? fmt(o.price) : 'no price'} (listed separately)</div>`).join('')}
       <div class="kv"><span>Set</span><span>${esc(c.set.name)}</span><span>Number</span><span>${esc(c.number || '—')}</span><span>Rarity</span><span>${esc(c.rarity || '—')}</span><span>Language</span><span>${LANGNAME[c.lang]}</span>${c.set.released ? `<span>Released</span><span>${new Date(c.set.released).toLocaleDateString()}</span>` : ''}</div>
       <div class="box"><h4>Current prices ${c.source === 'tcgdex' ? '(Cardmarket via TCGdex, USD converted from EUR)' : '(TCGplayer, USD)'}</h4>
         <table class="t"><thead><tr><th>${c.source === 'tcgdex' ? 'Source' : 'Variant'}</th><th>${c.source === 'tcgdex' ? 'Trend' : 'Market'}</th><th>Low</th><th>${c.source === 'tcgdex' ? 'Avg' : 'Mid'}</th><th>High</th></tr></thead><tbody>${priceRows}</tbody></table>
@@ -271,6 +273,7 @@ async function openCard(c) {
   let html = '';
   if (cm.found) html += `<div class="minichart"><canvas id="cmChart"></canvas></div><div class="muted small">Cardmarket average sale price over the last 30 days, 7 days and 1 day, plus Cardmarket's trend price (USD, ${esc(fxNote(cm))}). Updated ${cm.updated ? esc(new Date(cm.updated).toLocaleString()) : '—'}${cm.url ? ` · <a href="${esc(cm.url)}" target="_blank" rel="noopener">Cardmarket ↗</a>` : ''}.</div>`;
   else html += `<div class="muted small">Cardmarket averages: unavailable — ${esc(cm.reason)}.</div>`;
+  if (cm.found && c.edition) html += `<div class="muted small">⚠️ Cardmarket doesn't split this card by edition, so this chart mixes 1st Edition/Shadowless/Unlimited sales. The TCGplayer history below is edition-specific.</div>`;
   if (c.source === 'tcgcsv') html += days.size >= 2
     ? `<div class="minichart" style="margin-top:12px"><canvas id="histChart"></canvas></div><div class="muted small">Daily TCGplayer market price recorded by this site (${days.size} days).</div>`
     : `<div class="muted small" style="margin-top:10px">Daily TCGplayer price history: this site started recording on ${esc([...(S.status?.historyDays || [])][0] || 'today')} — a line chart appears here once there are 2+ days of snapshots (TCGplayer doesn't publish history).</div>`;
@@ -294,7 +297,8 @@ async function openCard(c) {
 function gradedLinks(c) {
   const base = String(c.name || '').replace(/\s-\s.*$/, '');
   const num = String(c.number || '').split('/')[0];
-  const q = `${base} ${num}`.trim();
+  const ed = c.edition === '1st' ? '1st Edition ' : /shadowless/i.test(c.editionLabel || '') ? 'Shadowless ' : '';
+  const q = `${ed}${base} ${num}`.trim();
   const setName = c.source === 'tcgdex' ? '' : ' ' + (c.set?.name || '');
   return `<a href="https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent('PSA ' + q + setName)}&LH_Sold=1&LH_Complete=1" target="_blank" rel="noopener">eBay sold graded listings ↗</a> · <a href="https://www.pricecharting.com/search-products?type=prices&q=${encodeURIComponent(q + setName)}" target="_blank" rel="noopener">PriceCharting ↗</a>`;
 }
@@ -306,7 +310,8 @@ async function loadGraded(c) {
     return;
   }
   let g;
-  try { g = await api(`/api/graded?productId=${c.id}`); } catch (e) { g = { available: false, reason: e.message }; }
+  const sub = c.edition ? c.prices[0]?.sub : null;
+  try { g = await api(`/api/graded?productId=${c.id}${sub ? `&subType=${encodeURIComponent(sub)}` : ''}`); } catch (e) { g = { available: false, reason: e.message }; }
   if (!document.body.contains(area)) return;
   area.classList.remove('muted');
   const pop = (g.population || []).filter(p => p.total);
@@ -324,10 +329,13 @@ async function loadGraded(c) {
   const head = `<tr><th>Grade</th>${cols.map(p => `<th>${esc(cols.length > 1 ? (p.printing || 'Unlimited') : 'Price')}</th>`).join('')}</tr>`;
   const rows = keys.map(k => `<tr class="${k.key === 'psa10' ? 'hl' : ''}"><td>${esc(k.label)}${k.company || k.key === 'ungraded' ? '' : ' <span class="muted small">any grader</span>'}</td>${cols.map(p => { const v = p.grades.find(x => x.key === k.key)?.price; return `<td>${k.key === 'psa10' ? `<b>${fmt(v)}</b>` : fmt(v)}</td>`; }).join('')}</tr>`).join('');
   const psa10 = cols[0].grades.find(x => x.key === 'psa10')?.price;
-  area.innerHTML = `<table class="t gt"><thead>${head}</thead><tbody>${rows}</tbody></table>
-    ${psa10 && raw ? `<div class="small" style="margin-top:4px">PSA 10 ≈ <b>${(psa10 / raw).toFixed(1)}×</b> the raw TCGplayer market price.</div>` : ''}
+  const edBanner = g.edition === '1st' ? (g.editionMatched
+      ? `<div class="small" style="margin-bottom:6px"><span class="badge ed1 inl">1st Ed</span> CardPrice's <b>1st Edition</b> graded sales for this card.</div>`
+      : `<div class="note" style="margin-bottom:6px">⚠️ ${esc(g.note || 'CardPrice does not separate 1st Edition for this card.')}</div>`) : '';
+  area.innerHTML = `${edBanner}<table class="t gt"><thead>${head}</thead><tbody>${rows}</tbody></table>
+    ${(() => { const ung = cols[0].grades.find(x => x.key === 'ungraded')?.price; const b = ung || raw; return psa10 && b ? `<div class="small" style="margin-top:4px">PSA 10 ≈ <b>${(psa10 / b).toFixed(1)}×</b> ${ung ? 'the ungraded sale price (same source)' : `the raw TCGplayer ${hasMarket(c) ? 'market' : 'listing mid'} price`}.</div>` : ''; })()}
     ${popHtml}
-    <div class="muted small" style="margin-top:6px">${g.note ? esc(g.note) + ' ' : ''}Grades 7–9.5 are the going rate for that grade from any grading company (mostly PSA); the “10” rows are company-specific. USD, updated ${esc(cols[0].date || '—')}. Source: <a href="${esc(g.source.url)}" target="_blank" rel="noopener">CardPrice ↗</a> · also see ${gradedLinks(c)}</div>`;
+    <div class="muted small" style="margin-top:6px">${g.note && g.editionMatched !== false ? esc(g.note) + ' ' : ''}Grades 7–9.5 are the going rate for that grade from any grading company (mostly PSA); the “10” rows are company-specific. USD, updated ${esc(cols[0].date || '—')}. Source: <a href="${esc(g.source.url)}" target="_blank" rel="noopener">CardPrice ↗</a> · also see ${gradedLinks(c)}</div>`;
 }
 $('#cardBody').addEventListener('click', e => { if (e.target.closest('[data-login]')) { e.preventDefault(); showAuth('login'); } });
 $('#cardBody').addEventListener('change', e => { const f = e.target.closest('.alertform'); if (f) refreshQuote(f); });
