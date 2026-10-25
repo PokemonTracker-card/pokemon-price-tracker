@@ -1,0 +1,17 @@
+{
+  "name": "pokemon-price-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pokémon TCG price tracker: card, booster pack and sealed product prices (TCGCSV/TCGplayer, TCGdex/Cardmarket) with accounts and price alerts.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --max-old-space-size=320 server.js",
+    "check-alerts": "node check_alerts.js"
+  },
+  "engines": {
+    "node": "22.x"
+  },
+  "dependencies": {
+    "pg": "^8.23.1"
+  }
+}

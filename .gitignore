@@ -1,0 +1,22 @@
+# dependencies
+node_modules/
+
+# logs / local process output
+*.log
+npm-debug.log*
+
+# runtime data: user accounts, sessions, alerts, caches, history, local invite-code config
+# (only the sourced pull-rate table in data/ is part of the app)
+data/*
+!data/pull-rates.json
+
+# secrets / local env
+.env
+.env.*
+
+# screenshots (local test artifacts)
+*.png
+
+# misc
+.DS_Store
+*.tmp

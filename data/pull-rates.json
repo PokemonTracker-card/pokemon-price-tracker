@@ -1,0 +1,286 @@
+{
+ "_about": {
+  "description": "Per-pack odds of pulling ANY card of a rarity tier from one booster pack of the set (English sets). Values are '1 in N packs'.",
+  "source": "Pullnomics — Pokémon TCG pull rates by set (aggregated from community/TCGplayer pack-opening counts)",
+  "sourceUrl": "https://pullnomics.com/pull-rates",
+  "sourceAsOf": "2026-09-15 (as listed on the source page)",
+  "retrieved": "2026-10-25",
+  "notes": [
+   "Specific-card odds shown on the site are derived as N x (number of cards of that rarity in the set) and assume every card of a tier is equally likely, as TCGplayer's pull-rate studies also assume.",
+   "Sword & Shield tiers like Full Art / Rainbow / Gold cannot be reliably identified from TCGplayer rarity labels, so only regular Pokémon V / VMAX (numbered within the main set) are mapped; other SWSH cards show 'unknown'.",
+   "Sets/tiers not in this table (all Japanese and Chinese sets, older eras, commons/uncommons/rares) show 'unknown'."
+  ],
+  "crossCheck": {
+   "SV: Prismatic Evolutions (TCGplayer article: SIR 1 in 45, Hyper Rare 1 in 180)": "https://www.tcgplayer.com/content/article/Pok%C3%A9mon-TCG-Prismatic-Evolutions-Pull-Rates/d94889ea-f76a-4a13-b74d-5b0b071220a7/",
+   "SV09: Journey Together (TCGplayer article: SIR 1 in 86, Hyper Rare 1 in 137)": "https://www.tcgplayer.com/content/article/Pok%C3%A9mon-TCG-Journey-Together-Pull-Rates/1b9f379f-97cb-45cc-b6f6-a1a070a422cd/"
+  }
+ },
+ "sets": {
+  "24722": {
+   "set": "ME: 30th Celebration",
+   "rates": {
+    "Double Rare": 4.5,
+    "Illustration Rare": 5.5,
+    "Special Illustration Rare": 19.5
+   }
+  },
+  "24688": {
+   "set": "ME05: Pitch Black",
+   "rates": {
+    "Double Rare": 5,
+    "Illustration Rare": 10,
+    "Ultra Rare": 12,
+    "Special Illustration Rare": 102.5,
+    "Mega Hyper Rare": 1315
+   }
+  },
+  "24655": {
+   "set": "ME04: Chaos Rising",
+   "rates": {
+    "Double Rare": 4.5,
+    "Illustration Rare": 9.5,
+    "Ultra Rare": 16.5,
+    "Special Illustration Rare": 82.5,
+    "Mega Hyper Rare": 975
+   }
+  },
+  "24587": {
+   "set": "ME03: Perfect Order",
+   "rates": {
+    "Illustration Rare": 9,
+    "Ultra Rare": 11,
+    "Mega Attack Rare": 40,
+    "Special Illustration Rare": 80,
+    "Mega Hyper Rare": 1400
+   }
+  },
+  "24541": {
+   "set": "ME: Ascended Heroes",
+   "rates": {
+    "Illustration Rare": 8.5,
+    "Ultra Rare": 11,
+    "Mega Attack Rare": 35,
+    "Special Illustration Rare": 88.5,
+    "Mega Hyper Rare": 540
+   }
+  },
+  "24448": {
+   "set": "ME02: Phantasmal Flames",
+   "rates": {
+    "Illustration Rare": 9,
+    "Ultra Rare": 12,
+    "Mega Attack Rare": 40,
+    "Special Illustration Rare": 80,
+    "Mega Hyper Rare": 1260
+   }
+  },
+  "24380": {
+   "set": "ME01: Mega Evolution",
+   "rates": {
+    "Double Rare": 5,
+    "Illustration Rare": 9,
+    "Ultra Rare": 12.5,
+    "Special Illustration Rare": 101,
+    "Mega Hyper Rare": 1260
+   }
+  },
+  "24269": {
+   "set": "SV10: Destined Rivals",
+   "rates": {
+    "Illustration Rare": 12,
+    "Special Illustration Rare": 94,
+    "Hyper Rare": 149
+   }
+  },
+  "24073": {
+   "set": "SV09: Journey Together",
+   "rates": {
+    "Double Rare": 5,
+    "Illustration Rare": 11,
+    "Ultra Rare": 15,
+    "Special Illustration Rare": 93,
+    "Hyper Rare": 131
+   }
+  },
+  "23821": {
+   "set": "SV: Prismatic Evolutions",
+   "rates": {
+    "Double Rare": 6,
+    "Ultra Rare": 19.5,
+    "Special Illustration Rare": 49,
+    "Hyper Rare": 166
+   }
+  },
+  "23651": {
+   "set": "SV08: Surging Sparks",
+   "rates": {
+    "Illustration Rare": 13,
+    "Ultra Rare": 15,
+    "Special Illustration Rare": 85,
+    "Hyper Rare": 189
+   }
+  },
+  "23537": {
+   "set": "SV07: Stellar Crown",
+   "rates": {
+    "Double Rare": 6,
+    "Illustration Rare": 13,
+    "Ultra Rare": 15,
+    "Special Illustration Rare": 90,
+    "Hyper Rare": 131
+   }
+  },
+  "23529": {
+   "set": "SV: Shrouded Fable",
+   "rates": {
+    "Illustration Rare": 12,
+    "Ultra Rare": 30,
+    "Special Illustration Rare": 57,
+    "Hyper Rare": 118
+   }
+  },
+  "23473": {
+   "set": "SV06: Twilight Masquerade",
+   "rates": {
+    "Double Rare": 6,
+    "Illustration Rare": 13,
+    "Ultra Rare": 15,
+    "Special Illustration Rare": 86,
+    "Hyper Rare": 146
+   }
+  },
+  "23381": {
+   "set": "SV05: Temporal Forces",
+   "rates": {
+    "Double Rare": 6,
+    "Illustration Rare": 12.5,
+    "Ultra Rare": 14,
+    "Special Illustration Rare": 74.5,
+    "Hyper Rare": 139
+   }
+  },
+  "23353": {
+   "set": "SV: Paldean Fates",
+   "rates": {
+    "Illustration Rare": 13,
+    "Ultra Rare": 14.5,
+    "Special Illustration Rare": 62.5,
+    "Hyper Rare": 97.5
+   }
+  },
+  "23286": {
+   "set": "SV04: Paradox Rift",
+   "rates": {
+    "Double Rare": 6.5,
+    "Illustration Rare": 12.5,
+    "Ultra Rare": 14,
+    "Special Illustration Rare": 49.5,
+    "Hyper Rare": 81.5
+   }
+  },
+  "23237": {
+   "set": "SV: Scarlet & Violet 151",
+   "rates": {
+    "Double Rare": 8,
+    "Illustration Rare": 12,
+    "Ultra Rare": 16,
+    "Special Illustration Rare": 32,
+    "Hyper Rare": 51
+   }
+  },
+  "23228": {
+   "set": "SV03: Obsidian Flames",
+   "rates": {
+    "Double Rare": 7,
+    "Illustration Rare": 13,
+    "Ultra Rare": 15.5,
+    "Special Illustration Rare": 29.5,
+    "Hyper Rare": 51
+   }
+  },
+  "23120": {
+   "set": "SV02: Paldea Evolved",
+   "rates": {
+    "Double Rare": 7,
+    "Illustration Rare": 12.5,
+    "Ultra Rare": 14,
+    "Special Illustration Rare": 33.5,
+    "Hyper Rare": 49.5
+   }
+  },
+  "22873": {
+   "set": "SV01: Scarlet & Violet Base Set",
+   "rates": {
+    "Double Rare": 7,
+    "Illustration Rare": 13,
+    "Ultra Rare": 15,
+    "Special Illustration Rare": 32,
+    "Hyper Rare": 53
+   }
+  },
+  "17688": {
+   "set": "SWSH: Crown Zenith",
+   "rates": {
+    "Pokémon V": 8
+   }
+  },
+  "3170": {
+   "set": "SWSH12: Silver Tempest",
+   "rates": {
+    "Pokémon V": 8.5
+   }
+  },
+  "3118": {
+   "set": "SWSH11: Lost Origin",
+   "rates": {
+    "Pokémon V": 8.5
+   }
+  },
+  "3040": {
+   "set": "SWSH10: Astral Radiance",
+   "rates": {
+    "Pokémon V": 7.5
+   }
+  },
+  "2948": {
+   "set": "SWSH09: Brilliant Stars",
+   "rates": {
+    "Pokémon V": 7.5
+   }
+  },
+  "2906": {
+   "set": "SWSH08: Fusion Strike",
+   "rates": {
+    "Pokémon V": 11,
+    "Pokémon VMAX": 26.5
+   }
+  },
+  "2848": {
+   "set": "SWSH07: Evolving Skies",
+   "rates": {
+    "Pokémon V": 9,
+    "Pokémon VMAX": 16.5
+   }
+  },
+  "2807": {
+   "set": "SWSH06: Chilling Reign",
+   "rates": {
+    "Pokémon VMAX": 30
+   }
+  },
+  "2754": {
+   "set": "Shining Fates",
+   "rates": {
+    "Pokémon V": 9,
+    "Pokémon VMAX": 19
+   }
+  },
+  "2701": {
+   "set": "SWSH04: Vivid Voltage",
+   "rates": {
+    "Pokémon V": 8,
+    "Pokémon VMAX": 23.5
+   }
+  }
+ }
+}

@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PokéPrice — Pokémon card & pack price tracker</title>
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='46' fill='%23ef4444'/><rect x='4' y='46' width='92' height='8' fill='%23111'/><path d='M4 50a46 46 0 0 0 92 0z' fill='%23f8fafc'/><circle cx='50' cy='50' r='14' fill='%23f8fafc' stroke='%23111' stroke-width='7'/></svg>">
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="ball"></span><span>Poké<b>Price</b></span></div>
+  <div class="fresh" id="fresh">Loading price index…</div>
+  <div class="account">
+    <button class="btn ghost" id="alertsBtn" hidden>🔔 Alerts <span class="pill" id="alertCount">0</span></button>
+    <button class="btn" id="authBtn">Log in</button>
+  </div>
+</header>
+
+<main>
+  <nav class="modes" id="modes"><button data-m="cards" class="on">🃏 Cards by Pokémon</button><button data-m="sealed">📦 Sealed products</button></nav>
+  <div id="cardsView">
+  <section class="hero">
+    <h1>Track any Pokémon's card prices</h1>
+    <p class="sub">Live TCGplayer market prices for every printing — English &amp; Japanese — plus Chinese cards via Cardmarket, the booster pack each card came from, and your odds of pulling it.</p>
+    <div class="searchwrap">
+      <div class="search">
+        <span class="icon">⌕</span>
+        <input id="q" type="search" placeholder="Search a Pokémon… e.g. Charizard" autocomplete="off" spellcheck="false" aria-label="Pokémon">
+        <button class="star" id="favBtn" title="Save as favorite" hidden>☆</button>
+      </div>
+      <ul class="ac" id="ac" role="listbox" hidden></ul>
+    </div>
+    <div class="langs" id="langs">
+      <button data-l="all" class="on">All languages</button>
+      <button data-l="en">🇺🇸 English</button>
+      <button data-l="ja">🇯🇵 Japanese</button>
+      <button data-l="zh-tw">繁體中文</button>
+      <button data-l="zh-cn">简体中文</button>
+    </div>
+    <div class="chips" id="chips"></div>
+  </section>
+
+  <section id="results" hidden>
+    <div class="pokehead">
+      <img id="pkSprite" alt="">
+      <div class="grow"><h2 id="pkName"></h2><div class="muted" id="pkMeta"></div></div>
+      <button class="btn ghost sm" id="toSealed">📦 Sealed products with this Pokémon</button>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="notes" id="notes"></div>
+
+    <div class="panel">
+      <div class="panelhead">
+        <div>
+          <h3>Most valuable printings vs. their booster pack</h3>
+          <div class="muted small">Bars: current TCGplayer market price of each card (USD) next to the market price of one booster pack from the set it came from. English + Japanese printings.</div>
+        </div>
+        <div class="seg" id="scaleSeg"><button data-s="logarithmic" class="on">Log</button><button data-s="linear">Linear</button></div>
+      </div>
+      <div class="chartbox"><canvas id="mainChart"></canvas></div>
+    </div>
+
+    <div class="toolbar">
+      <input id="filter" type="search" placeholder="Filter by card, set or rarity…">
+      <select id="sort">
+        <option value="price">Highest price</option>
+        <option value="priceAsc">Lowest price</option>
+        <option value="newest">Newest set</option>
+        <option value="oldest">Oldest set</option>
+        <option value="pull">Hardest to pull</option>
+      </select>
+      <label class="check"><input type="checkbox" id="pricedOnly" checked> Priced only</label>
+    </div>
+    <div class="grid" id="grid"></div>
+    <div class="more"><button class="btn ghost" id="moreBtn" hidden>Show more</button></div>
+  </section>
+
+  <section class="empty" id="empty">
+    <div class="emptyart">
+      <img src="https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/6.png" alt="">
+      <img src="https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/25.png" alt="">
+      <img src="https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/197.png" alt="">
+    </div>
+    <p class="muted">Pick a Pokémon above to see every card printed of it, what each is worth today, and what the booster pack costs.</p>
+  </section>
+  </div>
+
+  <div id="sealedView" hidden>
+    <section class="hero slim">
+      <h1>Sealed product prices</h1>
+      <p class="sub">Booster boxes, Elite Trainer Boxes, booster bundles, packs, collection boxes, tins, blisters, decks and cases — current TCGplayer market prices for every English &amp; Japanese set.</p>
+      <div class="sfilters">
+        <div class="search"><span class="icon">⌕</span><input id="sq" type="search" placeholder="Search sealed… e.g. Prismatic ETB, 151 booster box" autocomplete="off" aria-label="Search sealed products"></div>
+        <select id="sSet" aria-label="Set"><option value="">All sets</option></select>
+      </div>
+      <div class="langs" id="sLangs">
+        <button data-l="en,ja" class="on">All languages</button>
+        <button data-l="en">🇺🇸 English</button>
+        <button data-l="ja">🇯🇵 Japanese</button>
+        <button data-l="zh">中文 (Chinese)</button>
+      </div>
+      <div class="langs types" id="sTypes"></div>
+      <label class="check center" id="sPokeWrap" hidden><input type="checkbox" id="sPoke"> Only sets containing <b id="sPokeName"></b> cards</label>
+    </section>
+    <div class="stats" id="sStats"></div>
+    <div class="notes" id="sNotes"></div>
+    <div class="panel">
+      <div class="panelhead">
+        <div><h3 id="sChartTitle">Sealed prices</h3><div class="muted small" id="sChartSub"></div></div>
+        <div class="seg" id="sScaleSeg"><button data-s="logarithmic" class="on">Log</button><button data-s="linear">Linear</button></div>
+      </div>
+      <div class="chartbox"><canvas id="sChart"></canvas></div>
+    </div>
+    <div class="toolbar">
+      <select id="sSort"><option value="price">Highest price</option><option value="priceAsc">Lowest price</option><option value="newest">Newest set</option><option value="oldest">Oldest set</option></select>
+      <label class="check"><input type="checkbox" id="sPriced" checked> Priced only</label>
+      <label class="check"><input type="checkbox" id="sNoCases" checked> Hide cases</label>
+      <span class="muted small" id="sCount"></span>
+    </div>
+    <div class="grid" id="sGrid"></div>
+    <div class="more"><button class="btn ghost" id="sMore" hidden>Show more</button></div>
+  </div>
+</main>
+
+<footer>
+  <div><b>Data sources.</b> Card &amp; sealed pack prices: TCGplayer via <a href="https://tcgcsv.com" target="_blank" rel="noopener">TCGCSV</a> (refreshed daily, USD). Cardmarket 1/7/30-day averages &amp; Chinese cards: <a href="https://tcgdex.dev" target="_blank" rel="noopener">TCGdex</a> (EUR). Pull rates: <a href="https://pullnomics.com/pull-rates" target="_blank" rel="noopener">Pullnomics</a> (English sets). Pokémon list &amp; sprites: <a href="https://pokeapi.co" target="_blank" rel="noopener">PokeAPI</a>.</div>
+  <div class="muted small">Not affiliated with Nintendo, The Pokémon Company, TCGplayer or Cardmarket. Prices are marketplace data, not offers.</div>
+</footer>
+
+<!-- card detail -->
+<div class="modal" id="cardModal" hidden><div class="sheet wide" role="dialog" aria-modal="true">
+  <button class="x" data-close>×</button><div id="cardBody"></div>
+</div></div>
+
+<!-- auth -->
+<div class="modal" id="authModal" hidden><div class="sheet narrow" role="dialog" aria-modal="true">
+  <button class="x" data-close>×</button>
+  <div class="tabs"><button data-t="login" class="on">Log in</button><button data-t="signup">Sign up</button></div>
+  <form id="authForm" autocomplete="on">
+    <label>Username<input name="username" required minlength="3" maxlength="24" autocomplete="username"></label>
+    <label>Password<input name="password" type="password" required minlength="8" autocomplete="current-password"></label>
+    <label class="su">Alert email <span class="muted small">(where your price alerts should go)</span><input name="email" type="email" autocomplete="email"></label>
+    <label class="su">Invite code<input name="invite" autocomplete="off"></label>
+    <div class="err" id="authErr"></div>
+    <button class="btn wide" type="submit" id="authSubmit">Log in</button>
+  </form>
+</div></div>
+
+<!-- alerts / profile -->
+<div class="modal" id="alertsModal" hidden><div class="sheet" role="dialog" aria-modal="true">
+  <button class="x" data-close>×</button>
+  <h3>Your profile</h3>
+  <form id="profileForm" class="row">
+    <label class="grow">Alert email<input name="email" type="email" placeholder="you@example.com"></label>
+    <button class="btn" type="submit">Save</button>
+  </form>
+  <div class="muted small" id="profileMsg"></div>
+  <h3>Price alerts</h3>
+  <p class="muted small">You'll be emailed when an item's price drops to or below your target (checked daily after prices refresh). Each alert fires once, then re-arms if the price goes back above the target.</p>
+  <div id="alertList"></div>
+  <div class="row end"><button class="btn ghost" id="logoutBtn">Log out</button></div>
+</div></div>
+
+<div class="toast" id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

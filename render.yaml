@@ -1,0 +1,27 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# One free Node web service. Persistent data (accounts, sessions, alerts, price history, saved price index)
+# lives in an external Postgres given by DATABASE_URL (recommended: a free Neon database), because
+# free Render web services have an ephemeral filesystem and spin down after 15 minutes idle.
+services:
+  - type: web
+    name: pokemon-price-tracker
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: npm ci --omit=dev
+    startCommand: node --max-old-space-size=320 server.js   # heap cap well under the 512 MB free-tier RAM
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Render injects PORT (default 10000); server.js binds 0.0.0.0:$PORT.
+      - key: INVITE_CODE        # required to enable sign-up; set in the Render dashboard
+        sync: false
+      - key: ALERTS_API_TOKEN   # bearer token for GET /api/admin/alert-hits
+        sync: false
+      - key: DATABASE_URL       # e.g. Neon pooled connection string (…-pooler…/neondb?sslmode=require)
+        sync: false
+      - key: HISTORY_DAYS       # days of price history loaded for charts
+        value: "365"

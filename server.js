@@ -1,0 +1,603 @@
+// Pokémon TCG Price Tracker — Node backend (no npm dependencies).
+// Data: TCGCSV (daily TCGplayer prices for English [cat 3] + Japanese [cat 85] cards & sealed packs),
+//       TCGdex (Chinese cards + fresh Cardmarket 1/7/30-day averages), PokeAPI (names/sprites).
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const L = require('./lib');
+const { createStore } = require('./store');
+const { checkAlerts } = require('./alerts');
+
+const PORT = +process.env.PORT || 8787;
+const PROD = process.env.NODE_ENV === 'production';
+const HISTORY_DAYS = Math.max(2, +process.env.HISTORY_DAYS || 365); // days of history kept in memory for charts
+const store = createStore();
+const log = (...a) => console.log(new Date().toISOString(), ...a);
+
+// ---------- invite code ----------
+// Production: only the INVITE_CODE env var (sign-up is disabled if it's missing).
+// Development: INVITE_CODE, else data/config.json (auto-generated, git-ignored, re-read on every sign-up).
+const CONFIG_FILE = path.join(L.DATA, 'config.json');
+function loadConfig() {
+  const cfg = L.readJSON(CONFIG_FILE, {});
+  if (!cfg.inviteCode) { cfg.inviteCode = 'PKMN-' + crypto.randomBytes(4).toString('hex').toUpperCase(); L.writeJSON(CONFIG_FILE, cfg, true); }
+  return cfg;
+}
+function inviteCode() {
+  if (process.env.INVITE_CODE && process.env.INVITE_CODE.trim()) return process.env.INVITE_CODE.trim();
+  return PROD ? null : loadConfig().inviteCode;
+}
+
+// ---------- users / sessions (in memory, written through to the store) ----------
+const db = { users: {}, sessions: {} }; // username -> {username, pass, email, favorites:[], createdAt}; token -> {username, expires}
+async function loadAccounts() {
+  db.users = await store.all('users');
+  db.sessions = await store.all('sessions');
+  for (const [t, s] of Object.entries(db.sessions)) if (!s || s.expires < Date.now()) { delete db.sessions[t]; await store.del('sessions', t); }
+  log(`Loaded ${Object.keys(db.users).length} users, ${Object.keys(db.sessions).length} sessions from ${store.kind} store`);
+}
+const saveUser = u => store.put('users', u.username, u);
+
+// ---------- text normalisation ----------
+const norm = s => ' ' + String(s || '')
+  .replace(/♀/g, ' f ').replace(/♂/g, ' m ')
+  .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  .toLowerCase().replace(/[’'`.]/g, '').replace(/[^a-z0-9]+/g, ' ').trim() + ' ';
+
+// ---------- pull rates ----------
+const PULL = L.readJSON(path.join(L.ROOT, 'data', 'pull-rates.json'), { sets: {}, _about: {} });
+function tierFor(card, group) {
+  const rates = PULL.sets[String(group.groupId)]?.rates;
+  if (!rates || group.cat !== 3) return null;
+  if (rates[card.rarity]) return card.rarity;
+  const [n, t] = String(card.number).split('/').map(x => parseInt(x, 10));
+  const inMain = n && t && n <= t && !/alternate|full art|secret|shiny/i.test(card.name);
+  if (inMain && card.rarity === 'Ultra Rare') {
+    if (/\bVMAX\b/.test(card.name) && rates['Pokémon VMAX']) return 'Pokémon VMAX';
+    if (/\bV(\s|$|\s-)/.test(card.name.replace(/\s-\s.*$/, ' ')) && rates['Pokémon V']) return 'Pokémon V';
+  }
+  return null;
+}
+function pullInfo(card, group) {
+  const tier = tierFor(card, group);
+  if (!tier) return { known: false, reason: card.lang === 'en' ? 'No published pull-rate data for this set/rarity' : 'No published pull-rate data for this language' };
+  const oneIn = PULL.sets[String(group.groupId)].rates[tier];
+  const count = group.tierCounts?.[tier] || null;
+  return { known: true, tier, tierOneIn: oneIn, cardsInTier: count, specificOneIn: count ? Math.round(oneIn * count) : null, source: PULL._about.source, sourceUrl: PULL._about.sourceUrl, asOf: PULL._about.sourceAsOf };
+}
+
+// ---------- index (TCGCSV) ----------
+const state = { groups: [], groupByKey: new Map(), cards: [], byId: new Map(), packs: new Map(), sealed: [], sealedById: new Map(), packById: new Map(), lastUpdated: null, indexedAt: null, loading: false, progress: { done: 0, total: 0 }, pokemon: [], historyDays: [], storeReady: false, indexSource: null };
+const gkey = (cat, id) => `${cat}:${id}`;
+
+// Product lists change rarely (TCGCSV's group modifiedOn tells us when), so they're kept in one store blob and
+// only re-fetched for changed groups. This keeps a rebuild after a cold start to ~1 request per group (prices).
+let productsCache = null, productsDirty = false; // Map gkey -> {modifiedOn, fetchedAt, items}
+async function loadProducts(cat, g, force) {
+  const k = gkey(cat, g.groupId);
+  let products = productsCache.get(k);
+  if (!products) { // migrate the old per-file cache if present
+    const old = L.readJSON(L.cacheFile(`products-${cat}-${g.groupId}.json`), null);
+    if (old) products = { ...old, fetchedAt: Date.now() };
+  }
+  if (products && (force || products.modifiedOn !== g.modifiedOn || Date.now() - (products.fetchedAt || 0) > 7 * 864e5)) products = null;
+  if (!products) {
+    const j = await L.getJSON(`${L.TCGCSV}/${cat}/${g.groupId}/products`);
+    products = { modifiedOn: g.modifiedOn, fetchedAt: Date.now(), items: (j?.results || []).map(p => ({
+      id: p.productId, name: p.name, img: p.imageUrl, url: p.url,
+      number: L.ext(p, 'Number') || null, rarity: L.ext(p, 'Rarity') || null,
+      hp: L.ext(p, 'HP') || null, stage: L.ext(p, 'Stage') || null, type: L.ext(p, 'Card Type') || null })) };
+    productsDirty = true;
+  }
+  if (productsCache.get(k) !== products) { productsCache.set(k, products); productsDirty = true; }
+  return products.items;
+}
+
+const PACK_EXCLUDE = /\b(box|case|bundle|display|blister|code|lot|half|tin|build|bulk|packs|deck|set of)\b/i;
+function pickPack(products, priceMap, groupName) {
+  const core = groupName.replace(/^[^:]*:\s*/, '').toLowerCase();
+  const strip = n => n.toLowerCase().split(core).join(' ');
+  const cands = products.filter(p => !p.number && /\bpack(\s*[\[(].*)?$/i.test(p.name) && !PACK_EXCLUDE.test(strip(p.name)) && !/\b(energy|code card)\b/i.test(p.name))
+    .map(p => { const pr = (priceMap.get(p.id) || [])[0]; return { id: p.id, name: p.name, img: p.img, url: p.url, sub: pr?.sub ?? null, market: pr?.market ?? null, mid: pr?.mid ?? null, low: pr?.low ?? null }; });
+  if (!cands.length) return null;
+  const score = c => (/booster pack/i.test(c.name) ? 0 : 3) + (/sleeved/i.test(c.name) ? 2 : 0) + (/\[|\(/.test(c.name) ? 1 : 0) + (c.market == null ? (c.mid == null ? 6 : 4) : 0);
+  cands.sort((a, b) => score(a) - score(b) || (a.market ?? 1e9) - (b.market ?? 1e9));
+  return cands[0];
+}
+
+// ---------- sealed products ----------
+const SEALED_TYPES = [
+  ['Case', /\bcase\b/i],
+  ['Booster Box', /booster box|booster display box|expansion pack box|enhanced expansion box|\b(36|24|18|30|10)[- ]pack box/i],
+  ['Elite Trainer Box', /elite trainer box|\betb\b/i],
+  ['Booster Bundle', /booster bundle/i],
+  ['Display', /\bdisplay\b/i],
+  ['Booster Pack', /\b(booster|sleeved booster|expansion) pack\b|\bpack$|\bpack\s*[\[(]/i],
+  ['Blister', /blister/i],
+  ['Tin', /\btins?\b/i],
+  ['Deck', /\bdecks?\b|build\s*(&|and)\s*battle|starter set|battle academy/i],
+  ['Collection / Box', /collection|premium|\bbox\b|bundle|gift set|special set/i],
+];
+const SEALED_EXCLUDE = /code card|\benergy\b|sleeves?\b(?!.*(pack|box))|binder$|playmat|deck box$|coin$|\bjumbo\b|oversize/i;
+function sealedType(p) {
+  if (p.number || p.hp || p.stage || p.rarity || SEALED_EXCLUDE.test(p.name)) return null;
+  for (const [t, re] of SEALED_TYPES) if (re.test(p.name)) return t;
+  return null;
+}
+
+async function buildIndex(force = false) {
+  if (state.loading) return; state.loading = true;
+  const t0 = Date.now();
+  try {
+    if (!productsCache) { const b = await store.getBlob('cache:products').catch(e => { log('products cache read failed', e.message); return null; }); productsCache = new Map(b ? Object.entries(b) : []); productsDirty = false; }
+    const stamp = await L.getText('https://tcgcsv.com/last-updated.txt').catch(() => new Date().toISOString());
+    const groups = [];
+    for (const c of L.CATEGORIES) {
+      const gj = await L.getJSON(`${L.TCGCSV}/${c.id}/groups`);
+      for (const g of gj.results) groups.push({ cat: c.id, lang: c.lang, groupId: g.groupId, name: g.name, abbr: g.abbreviation, published: g.publishedOn, modifiedOn: g.modifiedOn });
+    }
+    state.progress = { done: 0, total: groups.length };
+    log(`Indexing ${groups.length} groups (prices stamp ${stamp})`);
+    const cards = [], packs = new Map(), snapshot = {}, sealed = [];
+    let i = 0;
+    const worker = async () => {
+      while (i < groups.length) {
+        const g = groups[i++];
+        try {
+          const products = await loadProducts(g.cat, g, force);
+          const prices = await L.groupPrices(g.cat, g.groupId, stamp);
+          const priceMap = new Map();
+          for (const [id, sub, low, mid, high, market] of prices) {
+            if (!priceMap.has(id)) priceMap.set(id, []);
+            priceMap.get(id).push({ sub, low, mid, high, market });
+            if (market != null) snapshot[`${id}|${sub}`] = market;
+          }
+          const pack = pickPack(products, priceMap, g.name);
+          if (pack) packs.set(gkey(g.cat, g.groupId), pack);
+          for (const p of products) { const t = sealedType(p); if (t) sealed.push({ id: p.id, name: p.name, img: p.img, url: p.url, type: t, cat: g.cat, lang: g.lang, groupId: g.groupId, n: p.name.toLowerCase(), prices: priceMap.get(p.id) || [] }); }
+          g.tierCounts = {};
+          for (const p of products) {
+            if (!p.number) continue;
+            g.tierCounts[p.rarity] = (g.tierCounts[p.rarity] || 0) + 1;
+            if (!(p.hp || p.stage)) continue; // Pokémon cards only
+            cards.push({ ...p, cat: g.cat, lang: g.lang, groupId: g.groupId, n: norm(p.name.replace(/\s-\s.*$/, '')), prices: priceMap.get(p.id) || [] });
+          }
+          // SWSH V / VMAX tier counts (regular, main-set numbered)
+          const rates = PULL.sets[String(g.groupId)]?.rates || {};
+          if (g.cat === 3 && (rates['Pokémon V'] || rates['Pokémon VMAX'])) {
+            for (const p of products) { if (!p.number) continue; const t = tierFor(p, g); if (t && t.startsWith('Pokémon')) g.tierCounts[t] = (g.tierCounts[t] || 0) + 1; }
+          }
+        } catch (e) { log('group failed', g.cat, g.groupId, g.name, e.message); }
+        state.progress.done++;
+      }
+    };
+    await Promise.all(Array.from({ length: 6 }, worker));
+    for (const g of groups) { // subset -> parent set pack fallback
+      const k = gkey(g.cat, g.groupId); if (packs.has(k)) continue;
+      const base = g.name.toLowerCase(); let best = null;
+      for (const h of groups) {
+        if (h.cat !== g.cat || h.groupId === g.groupId || !packs.has(gkey(h.cat, h.groupId)) || h.fromParent) continue;
+        const hn = h.name.toLowerCase();
+        if (base.startsWith(hn) && base.length > hn.length && (!best || hn.length > best.name.length)) best = h;
+      }
+      if (best) packs.set(k, { ...packs.get(gkey(best.cat, best.groupId)), fromParent: best.name });
+    }
+    applyIndex({ v: 1, stamp, indexedAt: new Date().toISOString(), groups, cards, sealed, packs: [...packs.entries()] });
+    state.indexSource = 'built';
+    log(`Indexed ${cards.length} Pokémon cards (${cards.filter(c => c.lang === 'ja').length} Japanese), ${packs.size} sets with a pack price, ${sealed.length} sealed products in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    // Persist: today's price snapshot (tracked products only), the index (for fast cold starts), the product cache.
+    const tracked = new Set([...cards.map(c => c.id), ...sealed.map(x => x.id), ...[...packs.values()].map(p => p.id)]);
+    const snap = {}; for (const [k, m] of Object.entries(snapshot)) if (tracked.has(+k.split('|')[0])) snap[k] = m;
+    const day = String(stamp).slice(0, 10);
+    try {
+      await store.putBlob(`history:${day}`, snap); histAddDay(day, snap);
+      if (!state.historyDays.includes(day)) state.historyDays = [...state.historyDays, day].sort();
+      await store.putBlob('index:latest', indexSnapshot());
+      if (productsDirty) { await store.putBlob('cache:products', Object.fromEntries(productsCache)); productsDirty = false; }
+      log(`Saved index + history ${day} to ${store.kind} store`);
+    } catch (e) { log('saving index/history failed', e.message); }
+  } finally { state.loading = false; productsCache = null; }
+}
+function indexSnapshot() { return { v: 1, stamp: state.lastUpdated, indexedAt: state.indexedAt, groups: state.groups, cards: state.cards, sealed: state.sealed, packs: [...state.packs.entries()] }; }
+function applyIndex(s) {
+  state.groups = s.groups; state.groupByKey = new Map(s.groups.map(g => [gkey(g.cat, g.groupId), g]));
+  state.sealed = s.sealed; state.sealedById = new Map(s.sealed.map(x => [x.id, x]));
+  state.cards = s.cards; state.byId = new Map(s.cards.map(c => [c.id, c])); state.packs = new Map(s.packs);
+  state.packById = new Map(s.packs.map(([k, p]) => [p.id, { ...p, groupKey: k }]));
+  state.lastUpdated = s.stamp; state.indexedAt = s.indexedAt;
+  state.progress = { done: s.groups.length, total: s.groups.length };
+}
+
+// ---------- price history (self-recorded daily snapshots) ----------
+// Compact in-memory layout: one Float32Array per day indexed by a shared key index ("productId|subType").
+// Loaded lazily on the first human request (not on health checks / the alert job) to keep DB egress low.
+const hist = { days: [], cols: [], keyIdx: new Map(), loaded: false, loading: null };
+function histAddDay(d, snap) {
+  for (const k of Object.keys(snap)) if (!hist.keyIdx.has(k)) hist.keyIdx.set(k, hist.keyIdx.size);
+  const col = new Float32Array(hist.keyIdx.size).fill(NaN);
+  for (const [k, m] of Object.entries(snap)) if (typeof m === 'number') col[hist.keyIdx.get(k)] = m;
+  const i = hist.days.indexOf(d);
+  if (i >= 0) { hist.cols[i] = col; return; }
+  let at = hist.days.findIndex(x => x > d); if (at < 0) at = hist.days.length;
+  hist.days.splice(at, 0, d); hist.cols.splice(at, 0, col);
+  while (hist.days.length > HISTORY_DAYS) { hist.days.shift(); hist.cols.shift(); }
+}
+function histPoints(key) {
+  const idx = hist.keyIdx.get(key); if (idx === undefined) return [];
+  const out = [];
+  hist.days.forEach((d, i) => { const v = idx < hist.cols[i].length ? hist.cols[i][idx] : NaN; if (!Number.isNaN(v)) out.push({ d, m: Math.round(v * 100) / 100 }); });
+  return out;
+}
+function ensureHistory() {
+  if (hist.loaded) return Promise.resolve();
+  if (!hist.loading) hist.loading = (async () => {
+    const t0 = Date.now();
+    const names = (await store.listBlobs('history:')).slice(-HISTORY_DAYS);
+    const snaps = await pool(names, 4, n => store.getBlob(n));
+    names.forEach((n, i) => { if (snaps[i] && !hist.days.includes(n.slice(8))) histAddDay(n.slice(8), snaps[i]); });
+    hist.loaded = true; log(`Loaded ${hist.days.length} days of price history in ${Date.now() - t0}ms`);
+  })().catch(e => { log('history load failed', e.message); hist.loading = null; });
+  return hist.loading;
+}
+const withHistory = () => Promise.race([ensureHistory(), L.sleep(8000)]);
+
+// ---------- PokeAPI ----------
+const SPECIAL = { 'mr-mime': 'Mr. Mime', 'mime-jr': 'Mime Jr.', 'mr-rime': 'Mr. Rime', farfetchd: "Farfetch'd", sirfetchd: "Sirfetch'd", 'nidoran-f': 'Nidoran♀', 'nidoran-m': 'Nidoran♂', 'ho-oh': 'Ho-Oh', 'porygon-z': 'Porygon-Z', 'jangmo-o': 'Jangmo-o', 'hakamo-o': 'Hakamo-o', 'kommo-o': 'Kommo-o', 'type-null': 'Type: Null', flabebe: 'Flabébé', 'chi-yu': 'Chi-Yu', 'chien-pao': 'Chien-Pao', 'ting-lu': 'Ting-Lu', 'wo-chien': 'Wo-Chien' };
+const display = slug => SPECIAL[slug] || slug.split('-').map(w => w[0].toUpperCase() + w.slice(1)).join(' ');
+async function loadPokemon() {
+  const cached = await store.getBlob('cache:pokemon').catch(() => null);
+  let list = cached && Date.now() - cached.at < 30 * 864e5 ? cached.list : null;
+  if (!list) {
+    try {
+      const j = await L.getJSON('https://pokeapi.co/api/v2/pokemon-species?limit=2000');
+      list = j.results.map(r => { const id = +r.url.match(/\/(\d+)\/?$/)[1]; return { id, slug: r.name, name: display(r.name), sprite: `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${id}.png` }; }).sort((a, b) => a.id - b.id);
+      await store.putBlob('cache:pokemon', { at: Date.now(), list }).catch(e => log('pokemon cache write failed', e.message));
+    } catch (e) { if (!cached) throw e; list = cached.list; log('PokeAPI failed, using stale list', e.message); }
+  }
+  state.pokemon = list; log(`Loaded ${list.length} Pokémon species`);
+}
+
+// ---------- TCGdex (Chinese cards; Cardmarket trends) ----------
+async function tcgdexList(lang, dexId) {
+  const f = L.cacheFile(`tcgdexlist-${lang}-${dexId}.json`);
+  let l = L.readJSON(f, null, 864e5);
+  if (!l) { l = await L.getJSON(`${L.TCGDEX}/${lang}/cards?dexId=eq:${dexId}`, { retries: 2 }) || []; L.writeJSON(f, l); }
+  return l;
+}
+async function pool(items, n, fn) { const out = []; let i = 0; await Promise.all(Array.from({ length: n }, async () => { while (i < items.length) { const k = i++; out[k] = await fn(items[k]).catch(() => null); } })); return out; }
+const cmPrice = cm => cm ? (cm.trend || cm.avg || cm['trend-holo'] || cm['avg-holo'] || null) : null;
+async function chineseCards(lang, dexId) {
+  const list = await tcgdexList(lang, dexId);
+  const details = await pool(list.slice(0, 80), 6, x => L.tcgdexCard(lang, x.id));
+  return details.filter(Boolean).map(c => {
+    const cm = c.pricing?.cardmarket || null;
+    return {
+      id: `tcgdex:${lang}:${c.id}`, source: 'tcgdex', tcgdexId: c.id, lang, name: c.name, number: `${c.localId}${c.set?.cardCount?.official ? '/' + c.set.cardCount.official : ''}`,
+      rarity: c.rarity || null, img: c.image ? `${c.image}/high.webp` : null, url: cm?.idProduct ? `https://www.cardmarket.com/en/Pokemon/Products?idProduct=${cm.idProduct}` : null,
+      set: { id: c.set?.id, name: c.set?.name || c.set?.id, abbr: c.set?.id, released: null },
+      prices: [], cardmarket: cm ? { ...cm, current: cmPrice(cm) } : null,
+      pack: null, packNote: 'No booster pack price source for Chinese-language sets',
+      pull: { known: false, reason: 'No published pull-rate data for Chinese sets' }, history: [],
+    };
+  });
+}
+const cmTrendCache = new Map();
+async function cardmarketTrend(productId, dexId) {
+  const k = `${productId}`; if (cmTrendCache.has(k)) return cmTrendCache.get(k);
+  const c = state.byId.get(+productId);
+  if (!c || !dexId) return { found: false, reason: 'Unknown card' };
+  const lang = c.lang === 'ja' ? 'ja' : 'en';
+  const num = String(c.number).split('/')[0].replace(/^0+(?=\d)/, '').toLowerCase();
+  let list;
+  try { list = await tcgdexList(lang, dexId); } catch { return { found: false, reason: 'TCGdex is not responding right now' }; }
+  const cands = list.filter(x => String(x.localId).replace(/^0+(?=\d)/, '').toLowerCase() === num);
+  const details = await pool(cands.slice(0, 12), 4, x => L.tcgdexCard(lang, x.id));
+  let hit = details.find(d => d && (d.variants_detailed || []).some(v => +v.thirdParty?.tcgplayer === +productId));
+  if (!hit && lang === 'ja') { // TCGdex's Japanese dexId index is incomplete: try "<SETCODE>-<number>" directly
+    const g = state.groupByKey.get(gkey(c.cat, c.groupId));
+    const code = (g.name.match(/^([A-Za-z0-9-]+):/) || [])[1];
+    const raw = String(c.number).split('/')[0];
+    if (code) for (const id of [`${code}-${raw}`, `${code}-${raw.padStart(3, '0')}`]) {
+      const d = await L.tcgdexCard('ja', id).catch(() => null);
+      if (d && (d.variants_detailed || []).some(v => +v.thirdParty?.tcgplayer === +productId)) { hit = d; break; }
+    }
+  }
+  let r;
+  if (!hit) r = { found: false, reason: 'No Cardmarket listing linked to this exact TCGplayer product in TCGdex' };
+  else {
+    const v = hit.variants_detailed.find(v => +v.thirdParty?.tcgplayer === +productId);
+    const cm = v?.pricing?.cardmarket || hit.pricing?.cardmarket;
+    r = cm ? { found: true, tcgdexId: hit.id, set: hit.set?.name, unit: cm.unit, updated: cm.updated, avg30: cm.avg30, avg7: cm.avg7, avg1: cm.avg1, trend: cm.trend, avg: cm.avg, low: cm.low,
+      holo: { avg30: cm['avg30-holo'], avg7: cm['avg7-holo'], avg1: cm['avg1-holo'], trend: cm['trend-holo'] }, url: `https://www.cardmarket.com/en/Pokemon/Products?idProduct=${cm.idProduct}` }
+      : { found: false, reason: 'Card found on TCGdex but it has no Cardmarket prices' };
+  }
+  cmTrendCache.set(k, r); setTimeout(() => cmTrendCache.delete(k), 6 * 3600e3);
+  return r;
+}
+
+// ---------- search ----------
+function serializeCard(c) {
+  const g = state.groupByKey.get(gkey(c.cat, c.groupId));
+  return {
+    id: c.id, source: 'tcgcsv', lang: c.lang, name: c.name, number: c.number, rarity: c.rarity, img: c.img, url: c.url,
+    set: { id: g.groupId, cat: g.cat, name: g.name, abbr: g.abbr, released: g.published },
+    prices: c.prices, pack: state.packs.get(gkey(c.cat, c.groupId)) || null,
+    packNote: state.packs.has(gkey(c.cat, c.groupId)) ? null : 'No single booster pack is sold for this set (promo/deck/special product) or none is listed on TCGplayer',
+    pull: pullInfo(c, g),
+    history: c.prices.map(p => ({ sub: p.sub, points: histPoints(`${c.id}|${p.sub}`) })),
+  };
+}
+async function search(name, langs) {
+  const q = norm(name);
+  if (q.trim().length < 2) return { cards: [], notes: [] };
+  const want = new Set(langs);
+  const out = state.cards.filter(c => want.has(c.lang) && c.n.includes(q)).map(serializeCard);
+  const mk = c => Math.max(-1, ...c.prices.map(p => p.market ?? -1));
+  const mid = c => Math.max(-1, ...c.prices.map(p => p.mid ?? -1));
+  out.sort((a, b) => (mk(b) >= 0) - (mk(a) >= 0) || mk(b) - mk(a) || mid(b) - mid(a));
+  const notes = [];
+  const zh = langs.filter(l => l.startsWith('zh'));
+  if (zh.length) {
+    const p = state.pokemon.find(p => norm(p.name) === q);
+    if (!p) notes.push('Chinese cards are looked up by Pokédex number — pick a Pokémon from the list to include them.');
+    else for (const l of zh) {
+      try { const zc = await chineseCards(l, p.id); zc.sort((a, b) => (b.cardmarket?.current || 0) - (a.cardmarket?.current || 0)); out.push(...zc); }
+      catch (e) { notes.push(`Couldn't reach TCGdex for ${l} cards right now.`); }
+    }
+  }
+  return { cards: out, notes };
+}
+
+const sealedPrice = x => { const ps = x.prices.filter(p => p.market != null); if (ps.length) return ps[0].market; const m = x.prices.find(p => p.mid != null); return m ? m.mid : null; };
+function serializeSealed(x) {
+  const g = state.groupByKey.get(gkey(x.cat, x.groupId));
+  return { id: x.id, name: x.name, type: x.type, lang: x.lang, img: x.img, url: x.url,
+    set: { id: g.groupId, cat: g.cat, name: g.name, abbr: g.abbr, released: g.published },
+    prices: x.prices, history: x.prices.map(p => ({ sub: p.sub, points: histPoints(`${x.id}|${p.sub}`) })) };
+}
+function sealedSets(langs) {
+  const counts = new Map();
+  for (const x of state.sealed) if (langs.includes(x.lang)) { const k = gkey(x.cat, x.groupId); const c = counts.get(k) || { n: 0, priced: 0 }; c.n++; if (sealedPrice(x) != null) c.priced++; counts.set(k, c); }
+  return [...counts.entries()].map(([k, c]) => { const g = state.groupByKey.get(k); return { cat: g.cat, groupId: g.groupId, name: g.name, lang: g.lang, released: g.published, count: c.n, priced: c.priced }; })
+    .sort((a, b) => String(b.released || '').localeCompare(String(a.released || '')));
+}
+function sealedSearch({ q, type, langs, cat, groupId, pokemon, exclude }) {
+  const terms = String(q || '').toLowerCase().split(/\s+/).filter(Boolean);
+  let groups = null;
+  if (pokemon) { const pq = norm(pokemon); groups = new Set(state.cards.filter(c => c.n.includes(pq)).map(c => gkey(c.cat, c.groupId))); }
+  const out = state.sealed.filter(x => langs.includes(x.lang) && (!type || x.type === type) && (!exclude || x.type !== exclude) && (!groupId || (x.groupId === +groupId && x.cat === +cat))
+    && (!groups || groups.has(gkey(x.cat, x.groupId)))
+    && terms.every(t => (x.n + ' ' + state.groupByKey.get(gkey(x.cat, x.groupId)).name.toLowerCase()).includes(t)));
+  out.sort((a, b) => (sealedPrice(b) != null) - (sealedPrice(a) != null) || (sealedPrice(b) ?? 0) - (sealedPrice(a) ?? 0));
+  return { total: out.length, items: out.slice(0, groupId ? 500 : 300).map(serializeSealed) };
+}
+
+// ---------- current price lookup for alerts ----------
+function currentFor(a) {
+  if (a.source === 'tcgcsv') {
+    if (a.kind === 'sealed') { const x = state.sealedById?.get(a.productId); if (!x) return null; const p = x.prices.find(p => p.sub === a.subType) || x.prices[0]; return p ? (p.market ?? p.mid ?? null) : null; }
+    const c = a.kind === 'pack' ? state.packById?.get(a.productId) : state.byId.get(a.productId);
+    if (!c) return null;
+    if (a.kind === 'pack') return c.market ?? c.mid ?? null;
+    const p = c.prices.find(p => p.sub === a.subType) || c.prices[0];
+    return p ? (p.market ?? p.mid ?? null) : null;
+  }
+  if (a.source === 'tcgdex') {
+    const c = L.readJSON(L.cacheFile(`tcgdex-${a.language}-${a.tcgdexId.replace(/[^\w.-]/g, '_')}.json`), null);
+    return cmPrice(c?.pricing?.cardmarket);
+  }
+  return null;
+}
+
+// ---------- HTTP helpers ----------
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
+function send(res, code, body, type = 'application/json', headers = {}) {
+  res.writeHead(code, { 'Content-Type': type, 'Cache-Control': type === 'application/json' ? 'no-store' : 'no-cache', 'X-Content-Type-Options': 'nosniff', ...headers });
+  res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
+}
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let b = ''; req.on('data', d => { b += d; if (b.length > 1e5) { reject(new Error('Body too large')); req.destroy(); } });
+    req.on('end', () => { try { resolve(b ? JSON.parse(b) : {}); } catch { reject(new Error('Invalid JSON')); } });
+  });
+}
+const cookies = req => Object.fromEntries((req.headers.cookie || '').split(';').map(s => s.trim().split('=')).filter(x => x[0]).map(([k, ...v]) => [k, decodeURIComponent(v.join('='))]));
+function currentUser(req) {
+  const t = cookies(req).sid; const s = t && db.sessions[t];
+  if (!s || s.expires < Date.now()) return null;
+  return db.users[s.username] || null;
+}
+function sessionCookie(req, token, maxAge) {
+  const secure = req.headers['x-forwarded-proto'] === 'https' || /trycloudflare|https/.test(req.headers['cf-visitor'] || '') ? '; Secure' : '';
+  return `sid=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}${secure}`;
+}
+const publicUser = u => u && ({ username: u.username, email: u.email || '', favorites: u.favorites || [] });
+const attempts = new Map(), adminFails = new Map();
+function rateLimited(ip) { const now = Date.now(); const a = (attempts.get(ip) || []).filter(t => now - t < 15 * 60e3); a.push(now); attempts.set(ip, a); return a.length > 20; }
+const validEmail = e => !e || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+const clientIp = req => req.headers['cf-connecting-ip'] || String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress;
+const sha = s => crypto.createHash('sha256').update(String(s)).digest();
+let alertCheckRunning = false;
+async function newSession(username) {
+  const token = crypto.randomBytes(32).toString('hex');
+  db.sessions[token] = { username, expires: Date.now() + 30 * 864e5 };
+  await store.put('sessions', token, db.sessions[token]);
+  return token;
+}
+
+const server = http.createServer(async (req, res) => {
+  const u = new URL(req.url, 'http://x');
+  const p = u.pathname;
+  try {
+    if (p === '/healthz') return send(res, 200, { ok: true, storage: store.kind, storeReady: state.storeReady, indexReady: state.cards.length > 0, indexing: state.loading, pricesUpdated: state.lastUpdated });
+    if (p.startsWith('/api/')) {
+      if (req.method === 'POST' && req.headers['content-type'] && !req.headers['content-type'].includes('application/json')) return send(res, 415, { error: 'JSON only' });
+      const ip = clientIp(req);
+      if (!state.storeReady && p !== '/api/status') return send(res, 503, { error: 'Starting up, try again in a few seconds' }, 'application/json', { 'Retry-After': '5' });
+      const user = currentUser(req);
+
+      // --- token-protected alert check for an external daily job (same logic as check_alerts.js) ---
+      if (p === '/api/admin/alert-hits') {
+        const tok = process.env.ALERTS_API_TOKEN;
+        if (!tok) return send(res, 503, { error: 'ALERTS_API_TOKEN is not configured on the server' });
+        const now = Date.now(), fails = (adminFails.get(ip) || []).filter(t => now - t < 15 * 60e3);
+        if (fails.length >= 10) return send(res, 429, { error: 'Too many failed attempts, try again later' });
+        const m = String(req.headers.authorization || '').match(/^Bearer\s+(\S+)\s*$/i);
+        if (!m || !crypto.timingSafeEqual(sha(m[1]), sha(tok))) { fails.push(now); adminFails.set(ip, fails); return send(res, 401, { error: 'Unauthorized' }, 'application/json', { 'WWW-Authenticate': 'Bearer' }); }
+        if (req.method !== 'GET') return send(res, 405, { error: 'GET only' });
+        if (alertCheckRunning) return send(res, 409, { error: 'An alert check is already running' });
+        const mark = ['1', 'true', 'yes'].includes(String(u.searchParams.get('markNotified')).toLowerCase());
+        alertCheckRunning = true;
+        try {
+          const hits = await checkAlerts(store, { markNotified: mark, onError: (a, e) => log(`alert ${a.id} price lookup failed: ${e.message}`) });
+          log(`admin alert check: ${hits.length} hit(s), markNotified=${mark}`);
+          return send(res, 200, hits, 'application/json', { 'X-Mark-Notified': mark ? '1' : '0' });
+        } finally { alertCheckRunning = false; }
+      }
+
+      if (p === '/api/status') return send(res, 200, { ready: state.cards.length > 0, loading: state.loading, progress: state.progress, cards: state.cards.length, japaneseCards: state.cards.filter(c => c.lang === 'ja').length, sets: state.groups.length, packs: state.packs.size, sealed: (state.sealed || []).length, pricesUpdated: state.lastUpdated, indexedAt: state.indexedAt, historyDays: state.historyDays, storage: store.kind, pullRates: PULL._about });
+      if (p === '/api/pokemon') return send(res, 200, state.pokemon);
+      if (p === '/api/search') {
+        if (!state.cards.length) return send(res, 503, { error: 'Price index is still loading, try again in a moment', progress: state.progress });
+        const langs = (u.searchParams.get('langs') || 'en,ja,zh-tw,zh-cn').split(',').filter(l => ['en', 'ja', 'zh-tw', 'zh-cn'].includes(l));
+        await withHistory();
+        const r = await search(u.searchParams.get('name') || '', langs);
+        return send(res, 200, { query: u.searchParams.get('name'), pricesUpdated: state.lastUpdated, ...r });
+      }
+      if (p === '/api/sealed/sets' || p === '/api/sealed') {
+        if (!state.cards.length) return send(res, 503, { error: 'Price index is still loading, try again in a moment' });
+        const langs = (u.searchParams.get('langs') || 'en,ja').split(',');
+        const zhNote = langs.some(l => l.startsWith('zh')) ? 'Chinese sealed products: no free price source exists (TCGplayer/TCGCSV only cover English and Japanese, and TCGdex has no sealed products), so none are shown.' : null;
+        if (p === '/api/sealed/sets') return send(res, 200, { sets: sealedSets(langs), note: zhNote });
+        await withHistory();
+        const r = sealedSearch({ q: u.searchParams.get('q'), type: u.searchParams.get('type'), langs, cat: u.searchParams.get('cat'), groupId: u.searchParams.get('groupId'), pokemon: u.searchParams.get('pokemon'), exclude: u.searchParams.get('exclude') });
+        return send(res, 200, { pricesUpdated: state.lastUpdated, ...r, types: SEALED_TYPES.map(t => t[0]), note: zhNote });
+      }
+      if (p === '/api/trend') return send(res, 200, await cardmarketTrend(u.searchParams.get('productId'), u.searchParams.get('dexId')));
+
+      // --- auth ---
+      if (p === '/api/signup' && req.method === 'POST') {
+        if (rateLimited(ip)) return send(res, 429, { error: 'Too many attempts, try again later' });
+        const b = await readBody(req);
+        const username = String(b.username || '').trim().toLowerCase();
+        const code = inviteCode();
+        if (!code) return send(res, 503, { error: 'Sign-up is disabled: no invite code is configured on the server' });
+        if (!crypto.timingSafeEqual(sha(String(b.invite || '').trim()), sha(code))) return send(res, 403, { error: 'Invalid invite code' });
+        if (!/^[a-z0-9_.-]{3,24}$/.test(username)) return send(res, 400, { error: 'Username: 3–24 letters, numbers, . _ -' });
+        if (String(b.password || '').length < 8) return send(res, 400, { error: 'Password must be at least 8 characters' });
+        if (!validEmail(b.email)) return send(res, 400, { error: 'That email address looks invalid' });
+        if (db.users[username]) return send(res, 409, { error: 'That username is taken' });
+        if (await store.get('users', username)) return send(res, 409, { error: 'That username is taken' });
+        db.users[username] = { username, pass: await L.hashPassword(String(b.password)), email: String(b.email || '').trim(), favorites: [], createdAt: new Date().toISOString() };
+        await saveUser(db.users[username]);
+        const token = await newSession(username);
+        return send(res, 200, { user: publicUser(db.users[username]) }, 'application/json', { 'Set-Cookie': sessionCookie(req, token, 30 * 86400) });
+      }
+      if (p === '/api/login' && req.method === 'POST') {
+        if (rateLimited(ip)) return send(res, 429, { error: 'Too many attempts, try again later' });
+        const b = await readBody(req);
+        const usr = db.users[String(b.username || '').trim().toLowerCase()];
+        if (!usr || !(await L.verifyPassword(String(b.password || ''), usr.pass))) return send(res, 401, { error: 'Wrong username or password' });
+        const token = await newSession(usr.username);
+        return send(res, 200, { user: publicUser(usr) }, 'application/json', { 'Set-Cookie': sessionCookie(req, token, 30 * 86400) });
+      }
+      if (p === '/api/logout' && req.method === 'POST') {
+        const t = cookies(req).sid; if (t && db.sessions[t]) { delete db.sessions[t]; await store.del('sessions', t); }
+        return send(res, 200, { ok: true }, 'application/json', { 'Set-Cookie': sessionCookie(req, '', 0) });
+      }
+      if (p === '/api/me') {
+        if (!user) return send(res, req.method === 'GET' ? 200 : 401, { user: null });
+        if (req.method === 'POST') {
+          const b = await readBody(req);
+          if (b.email !== undefined) { if (!validEmail(b.email)) return send(res, 400, { error: 'That email address looks invalid' }); user.email = String(b.email).trim(); }
+          await saveUser(user);
+        }
+        return send(res, 200, { user: publicUser(user) });
+      }
+      if (p === '/api/favorites' && req.method === 'POST') {
+        if (!user) return send(res, 401, { error: 'Log in to save favorites' });
+        const b = await readBody(req); const name = String(b.pokemon || '').slice(0, 40);
+        user.favorites = (user.favorites || []).filter(f => f !== name); if (b.on) user.favorites.unshift(name);
+        await saveUser(user); return send(res, 200, { user: publicUser(user) });
+      }
+      if (p === '/api/alerts') {
+        if (!user) return send(res, 401, { error: 'Log in to use price alerts' });
+        const all = Object.values(await store.all('alerts'));
+        if (req.method === 'GET') {
+          const mine = all.filter(a => a.profile === user.username).map(a => ({ ...a, current: currentFor(a) }));
+          return send(res, 200, { alerts: mine });
+        }
+        if (req.method === 'POST') {
+          const b = await readBody(req);
+          const target = Number(b.target);
+          if (!(target > 0)) return send(res, 400, { error: 'Enter a target price above 0' });
+          let item;
+          if (b.source === 'tcgdex') {
+            const lang = ['zh-tw', 'zh-cn'].includes(b.lang) ? b.lang : null;
+            const c = lang && await L.tcgdexCard(lang, String(b.tcgdexId || '')).catch(() => null);
+            if (!c) return send(res, 400, { error: 'Unknown card' });
+            const cm = c.pricing?.cardmarket;
+            item = { kind: 'card', source: 'tcgdex', tcgdexId: c.id, productId: null, subType: null, name: c.name, set: c.set?.name || c.set?.id, language: lang, currency: 'EUR', priceField: 'Cardmarket trend (avg if no trend) via TCGdex', url: cm?.idProduct ? `https://www.cardmarket.com/en/Pokemon/Products?idProduct=${cm.idProduct}` : null, img: c.image ? `${c.image}/high.webp` : null };
+          } else if (b.kind === 'sealed') {
+            const x = state.sealedById.get(+b.productId); if (!x) return send(res, 400, { error: 'Unknown sealed product' });
+            const g = state.groupByKey.get(gkey(x.cat, x.groupId));
+            const sub = (x.prices.find(p => p.sub === b.subType) || x.prices[0])?.sub || null;
+            item = { kind: 'sealed', sealedType: x.type, source: 'tcgcsv', category: g.cat, groupId: g.groupId, productId: x.id, subType: sub, name: x.name, set: g.name, language: g.lang, currency: 'USD', priceField: 'TCGplayer market (mid if no market)', url: x.url, img: x.img };
+          } else if (b.kind === 'pack') {
+            const pk = state.packById.get(+b.productId); if (!pk) return send(res, 400, { error: 'Unknown pack' });
+            const g = state.groupByKey.get(pk.groupKey);
+            item = { kind: 'pack', source: 'tcgcsv', category: g.cat, groupId: g.groupId, productId: pk.id, subType: pk.sub, name: pk.name, set: pk.fromParent || g.name, language: g.lang, currency: 'USD', priceField: 'TCGplayer market (mid if no market)', url: pk.url, img: pk.img };
+          } else {
+            const c = state.byId.get(+b.productId); if (!c) return send(res, 400, { error: 'Unknown card' });
+            const g = state.groupByKey.get(gkey(c.cat, c.groupId));
+            const sub = (c.prices.find(x => x.sub === b.subType) || c.prices[0])?.sub || null;
+            item = { kind: 'card', source: 'tcgcsv', category: g.cat, groupId: g.groupId, productId: c.id, subType: sub, name: c.name, set: g.name, language: g.lang, currency: 'USD', priceField: 'TCGplayer market (mid if no market)', url: c.url, img: c.img };
+          }
+          const existing = all.find(a => a.profile === user.username && a.source === item.source && (item.source === 'tcgdex' ? a.tcgdexId === item.tcgdexId : a.productId === item.productId && a.subType === item.subType && a.kind === item.kind));
+          if (existing) await store.put('alerts', existing.id, { ...existing, target, notified: false, updatedAt: new Date().toISOString() });
+          else { const id = crypto.randomBytes(6).toString('hex'); await store.put('alerts', id, { id, profile: user.username, ...item, target, notified: false, createdAt: new Date().toISOString() }); }
+          return send(res, 200, { ok: true });
+        }
+        if (req.method === 'DELETE') {
+          const id = u.searchParams.get('id');
+          const a = all.find(a => a.id === id && a.profile === user.username);
+          if (a) await store.del('alerts', a.id);
+          return send(res, 200, { ok: true });
+        }
+      }
+      return send(res, 404, { error: 'Not found' });
+    }
+    let fp = path.normalize(decodeURIComponent(p)).replace(/^(\.\.[/\\])+/, '');
+    if (fp === '/' || fp === '\\') fp = '/index.html';
+    const f = path.join(L.ROOT, 'public', fp);
+    if (!f.startsWith(path.join(L.ROOT, 'public'))) return send(res, 403, 'forbidden', 'text/plain');
+    fs.readFile(f, (err, buf) => err ? send(res, 404, 'Not found', 'text/plain') : send(res, 200, buf, MIME[path.extname(f)] || 'application/octet-stream'));
+  } catch (e) { log('error', p, e.stack || e.message); if (!res.headersSent) send(res, 500, { error: PROD ? 'Server error' : e.message }); }
+});
+server.listen(PORT, '0.0.0.0', () => log(`Listening on port ${PORT} (${PROD ? 'production' : 'development'}, ${store.kind} storage)`));
+
+// Startup: storage -> accounts -> Pokémon list -> saved price index (fast) -> rebuild in background only if TCGCSV has newer prices.
+(async () => {
+  const t0 = Date.now();
+  await store.init();
+  await loadAccounts();
+  state.storeReady = true;
+  await loadPokemon().catch(e => log('PokeAPI failed', e.message));
+  const snap = await store.getBlob('index:latest').catch(e => { log('saved index read failed', e.message); return null; });
+  if (snap?.v === 1 && snap.cards?.length) { applyIndex(snap); state.indexSource = 'saved'; log(`Loaded saved index (prices ${snap.stamp}) in ${Date.now() - t0}ms`); }
+  state.historyDays = (await store.listBlobs('history:').catch(() => [])).map(n => n.slice(8));
+  const refresh = async () => {
+    try { const s = await L.getText('https://tcgcsv.com/last-updated.txt'); if (s !== state.lastUpdated) await buildIndex(); }
+    catch (e) { log('refresh check failed', e.message); if (!state.cards.length) await buildIndex().catch(e2 => log('index failed', e2.message)); }
+  };
+  refresh(); // background: the site serves the saved index meanwhile
+  setInterval(refresh, 60 * 60 * 1000); // TCGCSV refreshes ~daily (~20:00 UTC); only re-pull when its stamp changes
+})().catch(e => { log('startup failed:', e.stack || e.message); process.exit(1); });
+
+let stopping = false;
+for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => {
+  if (stopping) return; stopping = true; log(`${sig}: shutting down`);
+  server.close(() => store.close().finally(() => process.exit(0)));
+  setTimeout(() => process.exit(0), 8000).unref();
+});
