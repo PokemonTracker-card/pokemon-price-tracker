@@ -36,6 +36,41 @@ function historyAverage(points) {
     : `site history, only ${n} day${n > 1 ? 's' : ''} (limited: fewer than ${MIN_HISTORY_DAYS})`;
   return { average, averageBasis, averageDays: n, averageLimited: n < MIN_HISTORY_DAYS, averageFrom: pts[0].d, averageTo: pts[n - 1].d };
 }
+// ---- CardPrice-sourced alerts (prize/trophy cards and other cards TCGplayer has no price for) ----
+// field 'raw' = CardPrice latest raw price (percent or target mode, average from CardPrice's own daily history);
+// a grade key (psa10, grade9, ...) = CardPrice graded value (target mode only — there's no graded history to average).
+const CP_FIELDS = { raw: 'raw (ungraded)', psa10: 'PSA 10', bgs10: 'BGS 10', cgc10: 'CGC 10', sgc10: 'SGC 10', grade95: 'grade 9.5', grade9: 'grade 9', grade8: 'grade 8', grade7: 'grade 7' };
+const cpMemo = new Map(); // `${cpId}` -> { at, data } (1 hour)
+async function cpGet(pathname) {
+  for (let i = 0; ; i++) {
+    const j = await L.getJSON(`https://api.cardprice.com${pathname}`, { retries: 1, timeout: 12000 });
+    if (j?.error !== 'warming' || i >= 2) return j?.error ? null : j;
+    await new Promise(r => setTimeout(r, 1000 * (j.retry || 2)));
+  }
+}
+async function cardpriceData(cpId) {
+  const hit = cpMemo.get(cpId); if (hit && Date.now() - hit.at < 3600e3) return hit.data;
+  const card = await cpGet(`/api/card/${encodeURIComponent(cpId)}`);
+  const hist = card?.card ? await cpGet(`/api/history?cardId=${encodeURIComponent(cpId)}`).catch(() => null) : null;
+  const g = (card?.gradedPrintings || []).find(x => (x.printing || '') === '') || (card?.gradedPrintings || [])[0] || card?.graded || null;
+  const days = new Map((hist?.series || []).filter(p => typeof p.price === 'number').map(p => [String(p.date).slice(0, 10), r2(p.price)]));
+  const data = { found: !!card?.card, latest: typeof card?.latestPrice === 'number' ? card.latestPrice : null, graded: g, history: [...days].map(([d, m]) => ({ d, m })) };
+  const vals = g ? ['grade7', 'grade8', 'grade9', 'psa10'].map(k => g[k]).filter(v => typeof v === 'number') : [];
+  data.suspicious = data.latest != null && vals.length > 0 && data.latest < Math.min(...vals) * 0.01;
+  if (cpMemo.size > 300) cpMemo.delete(cpMemo.keys().next().value);
+  cpMemo.set(cpId, { at: Date.now(), data });
+  return data;
+}
+async function cardpriceQuote(a) {
+  const d = await cardpriceData(a.cpId);
+  if (!a.field || a.field === 'raw') {
+    const avg = historyAverage(d.history);
+    if (avg.average != null) avg.averageBasis = avg.averageBasis.replace('site history', 'CardPrice daily history');
+    return { current: d.suspicious ? null : d.latest, avg };
+  }
+  const v = d.graded?.[a.field];
+  return { current: typeof v === 'number' ? v : null, avg: { average: null, averageBasis: 'no graded price history — fixed target only', averageDays: 0, averageLimited: true } };
+}
 // Cardmarket (tcgdex) alerts are evaluated in USD (EUR converted at the daily ECB rate). Alerts saved before that stored a
 // fixed target in EUR (currency 'EUR'); convert that target too so comparisons stay like-for-like.
 const usdAlert = (a, rate) => a.source === 'tcgdex' && a.currency === 'EUR' && a.target != null ? { ...a, target: r2(a.target * rate), currency: 'USD' } : a;
@@ -71,7 +106,7 @@ async function checkAlerts(store, { markNotified = false, historyPoints = null, 
   const users = await store.all('users');
   const stamp = await L.getText('https://tcgcsv.com/last-updated.txt').catch(() => null);
   // Site-history averages: from the caller (server's in-memory history) or straight from the store's history blobs.
-  const needHist = alerts.filter(a => a.source !== 'tcgdex').map(histKey);
+  const needHist = alerts.filter(a => a.source === 'tcgcsv').map(histKey);
   let histMap = null;
   const getHist = async a => {
     if (historyPoints) return historyPoints(histKey(a));
@@ -96,7 +131,7 @@ async function checkAlerts(store, { markNotified = false, historyPoints = null, 
   for (const a0 of alerts) {
     const a = usdAlert(a0, fx.rate);
     let q;
-    try { q = a.source === 'tcgdex' ? await tcgdexQuote(a) : await tcgcsvQuote(a); }
+    try { q = a.source === 'tcgdex' ? await tcgdexQuote(a) : a.source === 'cardprice' ? await cardpriceQuote(a) : await tcgcsvQuote(a); }
     catch (e) { onError(a, e); continue; }
     const { current, avg } = q;
     const ev = evaluate(a, current, avg);
@@ -110,7 +145,7 @@ async function checkAlerts(store, { markNotified = false, historyPoints = null, 
           percentOfAverage: ev.percentOfAverage, triggerPercent: ev.percent, triggerPrice: ev.triggerPrice, target: ev.triggerPrice,
           currency: a.source === 'tcgdex' ? 'USD' : a.currency,
           priceField: a.source === 'tcgdex' ? `Cardmarket trend (avg if no trend) via TCGdex, converted from EUR at 1 EUR = $${fx.rate} (${fx.date || fx.source})` : a.priceField,
-          link: a.url, image: a.img || null, pricesUpdated: a.source === 'tcgcsv' ? stamp : 'TCGdex/Cardmarket daily',
+          link: a.url, image: a.img || null, pricesUpdated: a.source === 'tcgcsv' ? stamp : a.source === 'cardprice' ? 'CardPrice (thin data — few or no recorded sales)' : 'TCGdex/Cardmarket daily',
         });
         Object.assign(upd, { notified: true, notifiedAt: now(), notifiedPrice: current });
       }
@@ -123,4 +158,4 @@ async function checkAlerts(store, { markNotified = false, historyPoints = null, 
   }
   return hits;
 }
-module.exports = { checkAlerts, usdAlert, productType, alertMode, alertPercent, cmCurrent, cmAverage, historyAverage, evaluate, DEFAULT_PERCENT, AVG_DAYS, MIN_HISTORY_DAYS };
+module.exports = { checkAlerts, cardpriceQuote, CP_FIELDS, usdAlert, productType, alertMode, alertPercent, cmCurrent, cmAverage, historyAverage, evaluate, DEFAULT_PERCENT, AVG_DAYS, MIN_HISTORY_DAYS };

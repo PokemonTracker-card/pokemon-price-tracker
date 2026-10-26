@@ -34,9 +34,7 @@ function inviteCode() {
 const db = { users: {}, sessions: {} }; // username -> {username, pass, email, favorites:[], createdAt}; token -> {username, expires}
 async function loadAccounts() {
   db.users = await store.all('users');
-  db.sessions = await store.all('sessions');
-  for (const [t, s] of Object.entries(db.sessions)) if (!s || s.expires < Date.now()) { delete db.sessions[t]; await store.del('sessions', t); }
-  log(`Loaded ${Object.keys(db.users).length} users, ${Object.keys(db.sessions).length} sessions from ${store.kind} store`);
+  log(`Loaded ${Object.keys(db.users).length} users from ${store.kind} store (sessions are signed cookies)`);
 }
 const saveUser = u => store.put('users', u.username, u);
 
@@ -48,6 +46,8 @@ const norm = s => ' ' + String(s || '')
 
 // ---------- pull rates ----------
 const PULL = L.readJSON(path.join(L.ROOT, 'data', 'pull-rates.json'), { sets: {}, _about: {} });
+// Curated prize/trophy cards: CardPrice-only cards TCGplayer doesn't list + extra aliases/citations for TCGplayer ones.
+const EVENTS = L.readJSON(path.join(L.ROOT, 'data', 'event-cards.json'), { cards: [], tcgplayer: {} });
 function tierFor(card, group) {
   const rates = PULL.sets[String(group.groupId)]?.rates;
   if (!rates || group.cat !== 3) return null;
@@ -127,7 +127,7 @@ function sealedType(p) {
   return null;
 }
 
-const INDEX_V = 2; // v2: trainer/item/energy cards included (t:1)
+const INDEX_V = 3; // v2: trainer/item/energy cards included (t:1); v3: unnumbered card-like products (prize/promo cards)
 async function buildIndex(force = false) {
   if (state.loading) return; state.loading = true;
   const t0 = Date.now();
@@ -160,8 +160,10 @@ async function buildIndex(force = false) {
           for (const p of products) { const t = sealedType(p); if (t) sealed.push({ id: p.id, name: p.name, img: p.img, url: p.url, type: t, cat: g.cat, lang: g.lang, groupId: g.groupId, n: p.name.toLowerCase(), prices: priceMap.get(p.id) || [] }); }
           g.tierCounts = {};
           for (const p of products) {
-            if (!p.number) continue;
-            g.tierCounts[p.rarity] = (g.tierCounts[p.rarity] || 0) + 1;
+            // Unnumbered products are indexed only if they look like a card (rarity/HP/stage) — this picks up prize/trophy and
+            // unnumbered promo cards (e.g. Pokemon Illustrator) while code cards and sealed product stay out.
+            if (!p.number && (!(p.rarity || p.hp || p.stage) || /^code card/i.test(p.name))) continue;
+            if (p.number) g.tierCounts[p.rarity] = (g.tierCounts[p.rarity] || 0) + 1;
             // Every numbered card is indexed (Pokémon, trainers, items, energy); non-Pokémon get t:1 so the by-Pokémon view skips them.
             const c = { ...p, cat: g.cat, lang: g.lang, groupId: g.groupId, n: norm(p.name.replace(/\s-\s.*$/, '')), prices: priceMap.get(p.id) || [] };
             if (!(p.hp || p.stage)) c.t = 1;
@@ -318,6 +320,7 @@ function serializeCard(c, prices = c.prices) {
   const g = state.groupByKey.get(gkey(c.cat, c.groupId));
   return {
     id: c.id, source: 'tcgcsv', lang: c.lang, name: c.name, number: c.number, rarity: c.rarity, img: c.img, url: c.url,
+    event: CS.ev.has(c.id) ? { kind: CS.ev.get(c.id), label: EVENT_LABEL[CS.ev.get(c.id)], note: EVENTS.tcgplayer[c.id]?.note || null, reportedSales: EVENTS.tcgplayer[c.id]?.reportedSales || null, pricecharting: EVENTS.tcgplayer[c.id]?.pricecharting || null } : null,
     set: { id: g.groupId, cat: g.cat, name: g.name, abbr: g.abbr, released: g.published },
     prices, pack: state.packs.get(gkey(c.cat, c.groupId)) || null,
     packNote: state.packs.has(gkey(c.cat, c.groupId)) ? null : 'No single booster pack is sold for this set (promo/deck/special product) or none is listed on TCGplayer',
@@ -358,10 +361,12 @@ async function search(name, langs) {
   const q = norm(name);
   if (q.trim().length < 2) return { cards: [], notes: [] };
   const want = new Set(langs);
-  const out = state.cards.filter(c => !c.t && want.has(c.lang) && c.n.includes(q)).flatMap(c => editionEntries(c));
+  const curated = id => { const pk = EVENTS.tcgplayer[id]?.pokemon; return pk && norm(pk) === q; };
+  const out = state.cards.filter(c => want.has(c.lang) && ((!c.t && c.n.includes(q)) || curated(c.id))).flatMap(c => editionEntries(c));
+  if (want.has('ja')) out.push(...EVENTS.cards.filter(e => e.pokemon && norm(e.pokemon) === q).map(serializeCurated));
   const mk = c => Math.max(-1, ...c.prices.map(p => p.market ?? -1));
   const mid = c => Math.max(-1, ...c.prices.map(p => p.mid ?? -1));
-  const pr = c => { const m = mk(c); return m >= 0 ? m : mid(c); };
+  const pr = c => { if (c.source === 'cardprice') return c.cp?.sortPrice ?? -1; const m = mk(c); return m >= 0 ? m : mid(c); };
   out.sort((a, b) => pr(b) - pr(a));
   const notes = [];
   const zh = langs.filter(l => l.startsWith('zh'));
@@ -381,7 +386,30 @@ async function search(name, langs) {
 // A query only touches the posting lists of its own tokens (no full-catalog scan per keystroke).
 const numKey = s => String(s || '').toLowerCase().replace(/\s+/g, '').replace(/(^|[^0-9])0+(?=\d)/g, '$1');
 const CJK = /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]/;
-const CS = { nameIdx: new Map(), nameVocab: [], setIdx: new Map(), setVocab: [], groupCards: new Map(), gnorm: new Map(), numIdx: new Map() };
+// ---------- prize / trophy / event cards ----------
+const PRIZE_GROUPS = new Set(['85:24521', '3:24529', '85:24494', '85:24205', '85:24203', '85:24197']);
+const EVENT_GROUPS = new Set(['3:22880', '3:2282', '3:1539', '3:2332', '85:24194', '85:24200', '85:24199', '85:24198', '85:24053', '85:23802']);
+const PRIZE_RX = /\btrophy\b|illustrator|\bno\.? ?[123] trainer|\bnumber [123] trainer|tropical (wind|tidal wave|mega battle|beach)|lucky stadium|victory (orb|ring|cup|medal)|champion'?s league|championship arena|elite four trainer|\[(1st|2nd|3rd|4th) place|\bwinner\b|\[top \d+|\bfinalist\b|\[champion\]|(comic|ichiban!?) competition|super secret battle|secret super battle|master'?s key/i;
+const EVENT_RX = /\[staff\]|championships?\b|\bworlds?\b|\bwcs\b|prize pack|\(pokemon league\)|league (promo|challenge|cup)|player rewards|prerelease|professor program|battle road|world hobby fair|corocoro|\bcampaign\b|\bmagazine\b|\[participation\]|illustration contest|\bpre-?release\b|\bevent\b/i;
+function eventKind(c, gname) {
+  const cur = EVENTS.tcgplayer[c.id]; if (cur?.kind) return cur.kind;
+  const k = gkey(c.cat, c.groupId);
+  if (PRIZE_RX.test(c.name) || PRIZE_GROUPS.has(k)) return 'prize';
+  if (EVENT_RX.test(c.name) || EVENT_GROUPS.has(k) || /championship|prize pack|professor program|corocoro|world hobby fair|battle road|card information/i.test(gname)) return 'event';
+  return null;
+}
+const EVENT_LABEL = { prize: 'Prize/Trophy', event: 'Event promo' };
+function eventKeywords(c, kind, gname) {
+  const w = ['card', 'event', 'promo'];
+  if (kind === 'prize') w.push('trophy', 'prize', 'tournament', 'competition');
+  if (/world|wcs/i.test(`${c.name} ${gname}`)) w.push('worlds', 'world', 'championship', 'championships');
+  if (/championship/i.test(`${c.name} ${gname}`)) w.push('championship', 'championships', 'tournament');
+  if (/prize pack/i.test(`${c.name} ${gname}`)) w.push('prize', 'pack');
+  if (/\[staff\]/i.test(c.name)) w.push('staff');
+  for (const a of EVENTS.tcgplayer[c.id]?.aliases || []) w.push(...norm(a).trim().split(' '));
+  return ` ${[...new Set(w)].join(' ')} `;
+}
+const CS = { kw: new Map(), ev: new Map(), nameIdx: new Map(), nameVocab: [], setIdx: new Map(), setVocab: [], groupCards: new Map(), gnorm: new Map(), numIdx: new Map() };
 function buildCardSearch() {
   const t0 = Date.now();
   const nameIdx = new Map(), setIdx = new Map(), groupCards = new Map(), gnorm = new Map(), numIdx = new Map();
@@ -391,13 +419,17 @@ function buildCardSearch() {
     gnorm.set(k, n);
     for (const w of new Set(n.trim().split(' '))) if (w) push(setIdx, w, k);
   }
+  const kw = new Map(), ev = new Map();
   state.cards.forEach((c, i) => {
     for (const w of new Set(c.n.trim().split(' '))) if (w) push(nameIdx, w, i);
+    const gname = state.groupByKey.get(gkey(c.cat, c.groupId))?.name || '';
+    const kind = eventKind(c, gname);
+    if (kind) { ev.set(c.id, kind); const k = eventKeywords(c, kind, gname); kw.set(i, k); for (const w of k.trim().split(' ')) if (!c.n.includes(` ${w} `)) push(nameIdx, w, i); }
     push(groupCards, gkey(c.cat, c.groupId), i);
     if (c.number) { const full = numKey(c.number), first = full.split('/')[0]; push(numIdx, first, i); if (full !== first) push(numIdx, full, i); }
   });
-  Object.assign(CS, { nameIdx, nameVocab: [...nameIdx.keys()].sort(), setIdx, setVocab: [...setIdx.keys()].sort(), groupCards, gnorm, numIdx });
-  log(`Card search index: ${nameIdx.size} name words, ${setIdx.size} set words, ${numIdx.size} numbers in ${Date.now() - t0}ms`);
+  Object.assign(CS, { kw, ev, nameIdx, nameVocab: [...nameIdx.keys()].sort(), setIdx, setVocab: [...setIdx.keys()].sort(), groupCards, gnorm, numIdx });
+  log(`Card search index: ${ev.size} prize/event cards (${[...ev.values()].filter(k => k === 'prize').length} prize/trophy), ${nameIdx.size} name words, ${setIdx.size} set words, ${numIdx.size} numbers in ${Date.now() - t0}ms`);
 }
 function prefixWords(vocab, t) { // sorted vocab -> words starting with t (binary search for the first)
   let lo = 0, hi = vocab.length;
@@ -425,11 +457,13 @@ function tokenCandidates(tok) {
   if (tok.num) for (const i of CS.numIdx.get(tok.num) || []) out.add(i);
   return out;
 }
-function tokenScore(c, tok) { // best way this token matches this card, or 0
+function tokenScore(c, tok, i) { // best way this token matches this card, or 0
   let s = 0;
   if (tok.num && c.number) { const full = numKey(c.number); if (full === tok.num || full.split('/')[0] === tok.num) s = tok.slash ? 12 : 9; }
   if (tok.slash) return s;
   if (c.n.includes(` ${tok.t} `)) s = Math.max(s, 10); else if (tok.t.length >= 2 && c.n.includes(` ${tok.t}`)) s = Math.max(s, 6);
+  const kw = CS.kw.get(i);
+  if (kw) { if (kw.includes(` ${tok.t} `)) s = Math.max(s, 5); else if (tok.t.length >= 2 && kw.includes(` ${tok.t}`)) s = Math.max(s, 3); }
   const gn = CS.gnorm.get(gkey(c.cat, c.groupId)) || '';
   if (gn.includes(` ${tok.t} `)) s = Math.max(s, 6); else if (tok.t.length >= 2 && gn.includes(` ${tok.t}`)) s = Math.max(s, 4);
   return s;
@@ -442,7 +476,7 @@ function indexCardSearch(toks, want, limit, sort = 'price') {
   for (const i of cands[0]) {
     const c = state.cards[i]; if (!want.has(c.lang)) continue;
     let score = 0, nameHits = 0, ok = true;
-    for (const tok of toks) { const s = tokenScore(c, tok); if (!s) { ok = false; break; } score += s; if (s === 10 || s === 6) nameHits++; }
+    for (const tok of toks) { const s = tokenScore(c, tok, i); if (!s) { ok = false; break; } score += s; if (s === 10 || s === 6) nameHits++; }
     if (!ok) continue;
     const nameWords = c.n.trim().split(' ').length;
     if (nameHits && nameHits >= nameWords) score += 8; // query covers the whole card name ("Charizard ex" vs "Charizard ex Special Delivery")
@@ -455,6 +489,8 @@ function indexCardSearch(toks, want, limit, sort = 'price') {
 }
 let pokemonNorms = null;
 function dexFor(c) {
+  const cur = EVENTS.tcgplayer[c.id]?.pokemon;
+  if (cur && state.pokemon.length) return state.pokemon.find(p => p.name === cur)?.id || null;
   if (c.t || !state.pokemon.length) return null;
   if (!pokemonNorms || pokemonNorms.src !== state.pokemon) pokemonNorms = { src: state.pokemon, list: state.pokemon.map(p => ({ id: p.id, n: norm(p.name) })).sort((a, b) => b.n.length - a.n.length) };
   return pokemonNorms.list.find(p => c.n.includes(p.n))?.id || null;
@@ -520,16 +556,21 @@ async function cardSearch(q0, langs, { zh = false, limit = 60, sort = 'price' } 
     for (let k = 0; k < toks.length; k++) { const rr = indexCardSearch(toks.filter((_, j) => j !== k), want, limit, sort); if (rr.total && (!best || rr.maxScore > best.r.maxScore)) best = { r: rr, dropped: toks[k].t }; }
     if (best) { r = best.r; notes.push(`No card matches every word — showing matches without “${best.dropped}”.`); }
   }
-  let cards = r.hits.flatMap(h => { const c = state.cards[h.i]; return editionEntries(c, { dexId: dexFor(c), kind: c.t ? 'trainer' : 'pokemon' }); });
+  let cards = r.hits.flatMap(h => { const c = state.cards[h.i]; return editionEntries(c, { dexId: dexFor(c), kind: c.t && !EVENTS.tcgplayer[c.id]?.pokemon ? 'trainer' : 'pokemon' }); });
   if (ed) {
     cards = cards.filter(c => c.edition === ed);
     r = { ...r, total: cards.length };
     notes.push(cards.length ? `Showing ${ed === '1st' ? '1st Edition' : 'Unlimited'} printings only.` : `No ${ed === '1st' ? '1st Edition' : 'Unlimited'} printing matches — 1st Edition exists for Wizards of the Coast-era English sets (1999–2003) and some Japanese sets.`);
     cards = cards.slice(0, outLimit);
   }
+  if (want.has('ja') && !ed && toks.length) { const cur = curatedSearch(toks); if (cur.length) { cards.push(...cur); r = { ...r, total: r.total + cur.length }; } }
   const zhLangs = langs.filter(l => l.startsWith('zh'));
   if (zh && zhLangs.length && !ed && !/^\s*[a-z]{0,5}\d+\s*\/\s*[a-z]{0,5}\d+\s*$/i.test(q)) cards.push(...await chineseCardSearch(q, toks, zhLangs, notes));
-  if (sort !== 'match') { const pr = c => c.source === 'tcgdex' ? (c.cardmarket?.current ?? -1) : Math.max(-1, ...c.prices.map(p => p.market ?? p.mid ?? -1)); cards.sort((a, b) => pr(b) - pr(a)); }
+  if (sort !== 'match') { const pr = c => c.source === 'tcgdex' ? (c.cardmarket?.current ?? -1) : c.source === 'cardprice' ? (c.cp?.sortPrice ?? -1) : Math.max(-1, ...c.prices.map(p => p.market ?? p.mid ?? -1)); cards.sort((a, b) => pr(b) - pr(a)); }
+  // A query that names a curated card exactly (e.g. "pikachu illustrator") pins it first even when it has no price to sort by.
+  const qn = norm(q).trim(), pinned = c => c.source === 'tcgcsv' && EVENTS.tcgplayer[c.id]?.pin === true && (EVENTS.tcgplayer[c.id]?.aliases || []).some(a => norm(a).trim() === qn);
+  if (cards.some(pinned)) { cards.sort((a, b) => pinned(b) - pinned(a)); notes.push('Exact match pinned first; it has no tracked price, so a price sort would otherwise put it last.'); }
+  if (cards.some(c => c.event)) notes.push('Prize/trophy and event cards trade rarely: prices can be a single old sale or only an asking price — open a card to see its sale count and data source.');
   return { total: r.total, cards, notes };
 }
 
@@ -542,7 +583,13 @@ const gradedSlot = () => new Promise(r => { if (gradedActive < 3) { gradedActive
 const gradedRelease = () => { const n = gradedQueue.shift(); if (n) n(); else gradedActive--; };
 async function cardpriceJSON(pathname) {
   await gradedSlot();
-  try { return await L.getJSON(`https://api.cardprice.com${pathname}`, { retries: 1, timeout: 12000 }); } finally { gradedRelease(); }
+  try {
+    for (let i = 0; ; i++) {
+      const j = await L.getJSON(`https://api.cardprice.com${pathname}`, { retries: 1, timeout: 12000 });
+      if (j?.error !== 'warming' || i >= 2) return j?.error ? null : j; // CardPrice answers {"error":"warming"} while its cache fills
+      await new Promise(r => setTimeout(r, 1000 * (j.retry || 2)));
+    }
+  } finally { gradedRelease(); }
 }
 const GRADE_ROWS = [['psa10', 'PSA 10', 'psa'], ['bgs10', 'BGS 10', 'bgs'], ['cgc10', 'CGC 10', 'cgc'], ['sgc10', 'SGC 10', 'sgc'], ['grade95', 'Grade 9.5', null], ['grade9', 'Grade 9', null], ['grade8', 'Grade 8', null], ['grade7', 'Grade 7', null], ['ungraded', 'Ungraded (raw)', null]];
 // CardPrice card record for a TCGplayer product, trimmed to what we use (cached 24h, incl. misses).
@@ -571,10 +618,19 @@ function cpPrintingFor(v, printings) {
   if (v.printing && printings.includes(v.printing)) return v.printing;
   return printings.includes('') ? '' : null;
 }
-async function gradedFor(productId, subType = null) {
+async function cardpriceCardById(cpId) {
+  const k = `cp:${cpId}`, hit = gradedCache.get(k);
+  if (hit && Date.now() - hit.at < GRADED_TTL) return hit.card;
+  const full = await cardpriceJSON(`/api/card/${encodeURIComponent(cpId)}`);
+  const card = full?.card ? { card: { id: full.card.id, name: full.card.name, slug: full.card.slug }, variants: [], gradedPrintings: full.gradedPrintings, graded: full.graded, population: full.population } : null;
+  if (gradedCache.size >= GRADED_MAX) gradedCache.delete(gradedCache.keys().next().value);
+  gradedCache.set(k, { at: Date.now(), card });
+  return card;
+}
+async function gradedFor(productId, subType = null, cpId = null) {
   const id = +productId;
-  const c = state.byId.get(id);
-  const card = await cardpriceCard(id);
+  const c = cpId ? null : state.byId.get(id);
+  const card = cpId ? await cardpriceCardById(cpId) : await cardpriceCard(id);
   const ed = edOf(subType);
   let r;
   {
@@ -597,8 +653,11 @@ async function gradedFor(productId, subType = null) {
       const pop = (card.population || []).filter(p => shown.has(p.printing ?? '') || (!matched.length && editionMatched !== false));
       const printings = rows.map(g => ({
         printing: g.printing || null, date: g.date,
-        grades: GRADE_ROWS.map(([k, label, co]) => ({ key: k, label, company: co, price: typeof g[k] === 'number' ? g[k] : null })).filter(x => x.price != null),
+        grades: (est => GRADE_ROWS.map(([k, label, co]) => ({ key: k, label, company: co, price: typeof g[k] === 'number' ? g[k] : null, estimated: est.has(k) || undefined, suspect: k === 'ungraded' && suspiciousRaw(g[k], g) || undefined })).filter(x => x.price != null))(estimatedGrades(g)),
       })).filter(p => p.grades.some(x => x.key !== 'ungraded'));
+      const anyEst = printings.some(p => p.grades.some(x => x.estimated));
+      if (anyEst) note = [note, 'Rows marked “est.” are CardPrice estimates derived from another grade (9.5 = 1.1× grade 9, BGS 10 = 1.3× and SGC 10 = 0.6× PSA 10), not recorded sales.'].filter(Boolean).join(' ');
+      if (printings.some(p => p.grades.some(x => x.suspect))) note = [note, 'The ungraded value is under 1% of the graded values for the same card, so it is probably a bad record — ignore it.'].filter(Boolean).join(' ');
       r = printings.length || pop.length ? {
         available: printings.length > 0, reason: printings.length ? null : 'CardPrice has population data but no graded sale prices for this card yet.',
         note, edition: ed, editionMatched, cardId: card.card.id, name: card.card.name, printings,
@@ -610,6 +669,80 @@ async function gradedFor(productId, subType = null) {
   }
   if (c && !r.available) r.hint = c.lang === 'ja' ? 'Japanese cards are graded less often, so many have no tracked graded sales.' : null;
   return r;
+}
+
+// ---------- CardPrice-only data: curated prize cards, sale counts ("thin data"), price history ----------
+// CardPrice derives some graded values from others (grade 9.5 = 1.1x grade 9, BGS 10 = 1.3x PSA 10, SGC 10 = 0.6x PSA 10);
+// those are flagged as estimates so they aren't mistaken for recorded sales.
+const near = (a, b) => a != null && b != null && Math.abs(a - b) <= Math.max(1, Math.abs(b) * 0.002);
+function estimatedGrades(g) {
+  const est = new Set();
+  if (near(g.grade95, g.grade9 * 1.1)) est.add('grade95');
+  if (near(g.bgs10, g.psa10 * 1.3)) est.add('bgs10');
+  if (near(g.sgc10, g.psa10 * 0.6)) est.add('sgc10');
+  return est;
+}
+// Raw price that is < 1% of the same card's graded values is almost certainly a bad record (e.g. a $21 "ungraded" trophy card).
+function suspiciousRaw(raw, g) {
+  const vals = g ? ['grade7', 'grade8', 'grade9', 'psa10'].map(k => g[k]).filter(v => typeof v === 'number') : [];
+  return raw != null && vals.length > 0 && raw < Math.min(...vals) * 0.01;
+}
+const THIN_SALES = 5; // fewer recorded sales than this in 90 days -> "few sales" flag
+const cpCache = new Map(); // cpId -> { at, info }
+async function cpInfo(cpId, { history = false } = {}) {
+  const hit = cpCache.get(cpId);
+  if (hit && Date.now() - hit.at < GRADED_TTL && (!history || hit.info.history)) return hit.info;
+  const full = await cardpriceJSON(`/api/card/${encodeURIComponent(cpId)}`);
+  if (!full?.card) { const info = { found: false }; cpCache.set(cpId, { at: Date.now(), info }); return info; }
+  const sales = await cardpriceJSON(`/api/sales?cardId=${encodeURIComponent(cpId)}`).catch(() => null);
+  const g = (full.gradedPrintings || []).find(x => (x.printing || '') === '') || (full.gradedPrintings || [])[0] || full.graded || null;
+  const latest = typeof full.latestPrice === 'number' ? full.latestPrice : null;
+  const list = (sales?.sales || []).slice().sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  const info = {
+    found: true, cpId, name: full.card.name, slug: full.card.slug, url: full.card.slug ? `https://cardprice.com/card/${full.card.slug}` : 'https://cardprice.com',
+    latest, latestSource: full.priceSource === 'pricecharting' ? 'PriceCharting (via CardPrice)' : full.priceSource === 'ebay' ? 'eBay (via CardPrice)' : full.priceSource ? `${full.priceSource} (via CardPrice)` : 'TCGplayer sales (via CardPrice)',
+    tcgListed: !cpId.startsWith('spx-'), thinFlag: !!full.thinData, suspicious: suspiciousRaw(latest, g), gradedRow: g,
+    sales: sales ? { source: 'TCGplayer completed sales (via CardPrice)', count7d: sales.count7d ?? 0, count30d: sales.count30d ?? 0, count90d: sales.count90d ?? 0, avg30d: sales.avg30d ?? null, avg90d: sales.avg90d ?? null,
+      last: list[0] ? { date: list[0].date, price: list[0].price, condition: list[0].condition, variant: list[0].variant } : null, oldest: sales.oldestSale || null,
+      recent: list.slice(0, 6).map(x => ({ date: x.date, price: x.price, condition: x.condition, variant: x.variant })), conditions: sales.conditions || null } : null,
+    population: full.population || [],
+  };
+  info.sales && (info.sales.few = info.sales.count90d < THIN_SALES);
+  if (history) {
+    const h = await cardpriceJSON(`/api/history?cardId=${encodeURIComponent(cpId)}`).catch(() => null);
+    const pts = (h?.series || []).filter(p => typeof p.price === 'number').map(p => ({ d: String(p.date).slice(0, 10), m: p.price }));
+    const days = new Map(pts.map(p => [p.d, p.m])); // one point per day, last wins
+    info.history = [...days].map(([d, m]) => ({ d, m })).slice(-365);
+  }
+  if (cpCache.size >= 400) cpCache.delete(cpCache.keys().next().value);
+  cpCache.set(cpId, { at: Date.now(), info });
+  return info;
+}
+async function cpIdForProduct(productId) { const card = await cardpriceCard(+productId); return card?.card?.id || null; }
+// CardPrice price used to sort curated cards: raw/ungraded only (graded-only estimates don't count), bad records excluded.
+const curatedState = new Map(); // cpId -> info (refreshed daily)
+async function refreshCurated() {
+  for (const e of EVENTS.cards) { try { curatedState.set(e.cpId, await cpInfo(e.cpId)); } catch (err) { log('curated refresh failed', e.cpId, err.message); } }
+  log(`Curated prize cards: ${EVENTS.cards.length} (${[...curatedState.values()].filter(i => i.latest != null).length} with a CardPrice raw price)`);
+}
+function serializeCurated(e) {
+  const i = curatedState.get(e.cpId);
+  const sortPrice = i && i.latest != null && !i.suspicious ? i.latest : null;
+  return {
+    id: `cp:${e.cpId}`, source: 'cardprice', cpId: e.cpId, lang: e.lang, name: e.name, number: null, rarity: 'Prize card', img: e.img,
+    url: e.slug ? `https://cardprice.com/card/${e.slug}` : null, kind: 'pokemon',
+    set: { id: 'spx-trophy', cat: null, name: e.set, abbr: 'Trophy', released: null }, prices: [],
+    cp: i ? { latest: i.latest, latestSource: i.latestSource, suspicious: i.suspicious, sortPrice, thinFlag: i.thinFlag } : { latest: null, sortPrice: null },
+    event: { kind: e.kind || 'prize', label: EVENT_LABEL[e.kind || 'prize'], curated: true, note: 'Not listed on TCGplayer — prices come from CardPrice only.' },
+    pack: null, packNote: 'Awarded as a prize — never sold in booster packs.', pull: { known: false, reason: 'Awarded as a tournament/contest prize, not pulled from packs' }, history: [],
+    dexId: e.pokemon ? state.pokemon.find(p => p.name === e.pokemon)?.id || null : null,
+    links: { pricecharting: `https://www.pricecharting.com/search-products?type=prices&q=${encodeURIComponent(e.name)}`, ebay: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(e.name.replace(/[()]/g, ''))}&LH_Sold=1&LH_Complete=1`, psa: `https://www.psacard.com/pop/search?q=${encodeURIComponent(e.name.replace(/[()]/g, ''))}` },
+  };
+}
+const curatedText = e => ` ${norm([e.name, e.set, ...(e.aliases || []), 'trophy prize card event promo tournament competition contest japanese', e.pokemon || ''].join(' ')).trim()} `;
+function curatedSearch(toks) {
+  const words = toks.filter(t => !t.slash).map(t => t.t); if (!words.length || words.length !== toks.length) return [];
+  return EVENTS.cards.filter(e => { const t = curatedText(e); return words.every(w => t.includes(` ${w}`)); }).map(serializeCurated);
 }
 
 const sealedPrice = x => { const ps = x.prices.filter(p => p.market != null); if (ps.length) return ps[0].market; const m = x.prices.find(p => p.mid != null); return m ? m.mid : null; };
@@ -666,6 +799,16 @@ function quoteFor(a, cm) {
     mode: ev.mode, percent: ev.percent, triggerPrice: ev.triggerPrice, percentOfAverage: ev.percentOfAverage, triggered: ev.hit };
 }
 
+// Async variant that also covers CardPrice-sourced alerts (prize cards / cards with no TCGplayer price).
+async function quoteAny(a, cm) {
+  if (a.source !== 'cardprice') return quoteFor(a, cm);
+  const { current, avg } = await AL.cardpriceQuote(a).catch(() => ({ current: null, avg: { average: null, averageBasis: 'CardPrice not responding', averageDays: 0, averageLimited: true } }));
+  const ev = AL.evaluate(a, current, avg);
+  return { currency: 'USD', target: a.target ?? null, current, average: avg.average, averageBasis: avg.averageBasis, averageDays: avg.averageDays, averageLimited: avg.averageLimited,
+    mode: ev.mode, percent: ev.percent, triggerPrice: ev.triggerPrice, percentOfAverage: ev.percentOfAverage, triggered: ev.hit };
+}
+const cpIdOk = id => /^(spx|tcg|cp)-[\w-]{1,80}$/.test(String(id || '')) || EVENTS.cards.some(e => e.cpId === id);
+
 // ---------- HTTP helpers ----------
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
 function send(res, code, body, type = 'application/json', headers = {}) {
@@ -679,16 +822,51 @@ function readBody(req) {
   });
 }
 const cookies = req => Object.fromEntries((req.headers.cookie || '').split(';').map(s => s.trim().split('=')).filter(x => x[0]).map(([k, ...v]) => [k, decodeURIComponent(v.join('='))]));
-function currentUser(req) {
-  const t = cookies(req).sid; const s = t && db.sessions[t];
-  if (!s || s.expires < Date.now()) return null;
-  return db.users[s.username] || null;
+// ---------- stateless signed sessions ----------
+// Cookie "sid" = base64url(JSON claims) + "." + base64url(HMAC-SHA256(claims, SESSION_SECRET)).
+// Claims: u username, id per-account uid, e email, iat/exp (ms), v session version. Validation needs only the secret, so sessions
+// survive restarts/redeploys. Logout bumps the account's session version (revokes every cookie issued before it).
+// If the account record is gone (free-plan JSON store wiped on redeploy) a minimal profile is recreated from the claims.
+const SESSION_TTL = 365 * 864e5, SESSION_REFRESH = 864e5;
+const SESSION_SECRET = (() => {
+  const s = process.env.SESSION_SECRET;
+  if (s && s.length >= 32) return Buffer.from(s);
+  log('WARNING: SESSION_SECRET is not set (or too short) - using a random per-process key; sign-ins will not survive a restart.');
+  return crypto.randomBytes(48);
+})();
+const b64u = b => Buffer.from(b).toString('base64url');
+const sign = data => crypto.createHmac('sha256', SESSION_SECRET).update(data).digest();
+function makeToken(u) {
+  const now = Date.now();
+  const body = b64u(JSON.stringify({ u: u.username, id: u.uid, e: u.email || '', iat: now, exp: now + SESSION_TTL, v: u.sv || 0 }));
+  return `${body}.${b64u(sign(body))}`;
+}
+function readToken(t) {
+  if (!t || typeof t !== 'string' || t.length > 2000) return null;
+  const [body, mac] = t.split('.'); if (!body || !mac) return null;
+  const want = sign(body), got = Buffer.from(mac, 'base64url');
+  if (got.length !== want.length || !crypto.timingSafeEqual(got, want)) return null;
+  try { const c = JSON.parse(Buffer.from(body, 'base64url').toString()); return c && c.u && c.exp > Date.now() ? c : null; } catch { return null; }
+}
+async function currentUser(req, res) {
+  const c = readToken(cookies(req).sid); if (!c) return null;
+  let u = db.users[c.u];
+  if (u) {
+    if (!u.uid) { u.uid = c.id; await saveUser(u); } // accounts created before uids existed adopt the first valid token's uid
+    if (u.uid !== c.id || (u.sv || 0) !== (c.v || 0)) return null; // different account with the same name, or logged out
+  } else {
+    // Record missing (store wiped): recreate a minimal profile from the signed claims so the person stays signed in.
+    u = db.users[c.u] = { username: c.u, uid: c.id, sv: c.v || 0, pass: null, email: c.e || '', favorites: [], createdAt: new Date(c.iat).toISOString(), restoredFromSession: new Date().toISOString() };
+    await saveUser(u); log('restored account from session cookie:', c.u);
+  }
+  if (res && Date.now() - c.iat > SESSION_REFRESH) res.setHeader('Set-Cookie', sessionCookie(req, makeToken(u), SESSION_TTL / 1000)); // sliding expiry
+  return u;
 }
 function sessionCookie(req, token, maxAge) {
-  const secure = req.headers['x-forwarded-proto'] === 'https' || /trycloudflare|https/.test(req.headers['cf-visitor'] || '') ? '; Secure' : '';
-  return `sid=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}${secure}`;
+  const secure = PROD || req.headers['x-forwarded-proto'] === 'https' || /trycloudflare|https/.test(req.headers['cf-visitor'] || '') ? '; Secure' : '';
+  return `sid=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(maxAge)}${secure}`;
 }
-const publicUser = u => u && ({ username: u.username, email: u.email || '', favorites: u.favorites || [] });
+const publicUser = u => u && ({ username: u.username, email: u.email || '', favorites: u.favorites || [], restored: !u.pass });
 const attempts = new Map(), adminFails = new Map();
 function rateLimited(ip) { const now = Date.now(); const a = (attempts.get(ip) || []).filter(t => now - t < 15 * 60e3); a.push(now); attempts.set(ip, a); return a.length > 20; }
 const validEmail = e => !e || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
@@ -696,10 +874,9 @@ const clientIp = req => req.headers['cf-connecting-ip'] || String(req.headers['x
 const sha = s => crypto.createHash('sha256').update(String(s)).digest();
 let alertCheckRunning = false;
 async function newSession(username) {
-  const token = crypto.randomBytes(32).toString('hex');
-  db.sessions[token] = { username, expires: Date.now() + 30 * 864e5 };
-  await store.put('sessions', token, db.sessions[token]);
-  return token;
+  const u = db.users[username];
+  if (!u.uid) { u.uid = crypto.randomBytes(12).toString('base64url'); await saveUser(u); }
+  return makeToken(u);
 }
 
 const server = http.createServer(async (req, res) => {
@@ -711,7 +888,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && req.headers['content-type'] && !req.headers['content-type'].includes('application/json')) return send(res, 415, { error: 'JSON only' });
       const ip = clientIp(req);
       if (!state.storeReady && p !== '/api/status') return send(res, 503, { error: 'Starting up, try again in a few seconds' }, 'application/json', { 'Retry-After': '5' });
-      const user = currentUser(req);
+      const user = await currentUser(req, res);
 
       // --- token-protected alert check for an external daily job (same logic as check_alerts.js) ---
       if (p === '/api/admin/alert-hits') {
@@ -761,10 +938,23 @@ const server = http.createServer(async (req, res) => {
         const sort = u.searchParams.get('sort') === 'match' ? 'match' : 'price';
         return send(res, 200, { query: q, sort, pricesUpdated: state.lastUpdated, ...(await cardSearch(q, langs, { zh, limit, sort })) });
       }
+      if (p === '/api/cpinfo') {
+        // Sales count / last sale / thin-data flag / CardPrice price history (+ cited record sales for curated cards).
+        let cpId = u.searchParams.get('cardId'); const pid = +u.searchParams.get('productId');
+        try {
+          if (!cpId && pid && state.byId.has(pid)) cpId = await cpIdForProduct(pid);
+          if (!cpId || !cpIdOk(cpId)) return send(res, 200, { found: false, reason: 'CardPrice has no record of this card.' });
+          const info = await cpInfo(cpId, { history: true });
+          const ev = pid ? EVENTS.tcgplayer[pid] : null;
+          const { gradedRow, ...out } = info;
+          return send(res, 200, { ...out, thinThreshold: THIN_SALES, reportedSales: ev?.reportedSales || null, note: ev?.note || null, pricecharting: ev?.pricecharting || null });
+        } catch (e) { log('cpinfo failed', cpId || pid, e.message); return send(res, 200, { found: false, reason: 'CardPrice is not responding right now — try again in a bit.', temporary: true }); }
+      }
       if (p === '/api/graded') {
+        const cpId = u.searchParams.get('cardId');
         const id = +u.searchParams.get('productId');
-        if (!id || !state.byId.has(id)) return send(res, 404, { available: false, reason: 'Unknown card' });
-        try { return send(res, 200, await gradedFor(id, u.searchParams.get('subType') || null)); }
+        if (cpId ? !cpIdOk(cpId) : (!id || !state.byId.has(id))) return send(res, 404, { available: false, reason: 'Unknown card' });
+        try { return send(res, 200, await gradedFor(id, u.searchParams.get('subType') || null, cpId || null)); }
         catch (e) { log('graded lookup failed', id, e.message); return send(res, 200, { available: false, reason: 'CardPrice is not responding right now — try again in a bit.', temporary: true }); }
       }
       if (p === '/api/trend') return send(res, 200, await cardmarketTrend(u.searchParams.get('productId'), u.searchParams.get('dexId')));
@@ -780,23 +970,27 @@ const server = http.createServer(async (req, res) => {
         if (!/^[a-z0-9_.-]{3,24}$/.test(username)) return send(res, 400, { error: 'Username: 3–24 letters, numbers, . _ -' });
         if (String(b.password || '').length < 8) return send(res, 400, { error: 'Password must be at least 8 characters' });
         if (!validEmail(b.email)) return send(res, 400, { error: 'That email address looks invalid' });
+        if (db.users[username] && !db.users[username].pass && user === db.users[username]) { // profile restored from a session cookie: let its owner set a password again
+          user.pass = await L.hashPassword(String(b.password)); if (b.email) user.email = String(b.email).trim(); delete user.restoredFromSession; await saveUser(user);
+          return send(res, 200, { user: publicUser(user) }, 'application/json', { 'Set-Cookie': sessionCookie(req, makeToken(user), SESSION_TTL / 1000) });
+        }
         if (db.users[username]) return send(res, 409, { error: 'That username is taken' });
         if (await store.get('users', username)) return send(res, 409, { error: 'That username is taken' });
-        db.users[username] = { username, pass: await L.hashPassword(String(b.password)), email: String(b.email || '').trim(), favorites: [], createdAt: new Date().toISOString() };
+        db.users[username] = { username, uid: crypto.randomBytes(12).toString('base64url'), sv: 0, pass: await L.hashPassword(String(b.password)), email: String(b.email || '').trim(), favorites: [], createdAt: new Date().toISOString() };
         await saveUser(db.users[username]);
         const token = await newSession(username);
-        return send(res, 200, { user: publicUser(db.users[username]) }, 'application/json', { 'Set-Cookie': sessionCookie(req, token, 30 * 86400) });
+        return send(res, 200, { user: publicUser(db.users[username]) }, 'application/json', { 'Set-Cookie': sessionCookie(req, token, SESSION_TTL / 1000) });
       }
       if (p === '/api/login' && req.method === 'POST') {
         if (rateLimited(ip)) return send(res, 429, { error: 'Too many attempts, try again later' });
         const b = await readBody(req);
         const usr = db.users[String(b.username || '').trim().toLowerCase()];
-        if (!usr || !(await L.verifyPassword(String(b.password || ''), usr.pass))) return send(res, 401, { error: 'Wrong username or password' });
+        if (!usr || !usr.pass || !(await L.verifyPassword(String(b.password || ''), usr.pass))) return send(res, 401, { error: 'Wrong username or password' });
         const token = await newSession(usr.username);
-        return send(res, 200, { user: publicUser(usr) }, 'application/json', { 'Set-Cookie': sessionCookie(req, token, 30 * 86400) });
+        return send(res, 200, { user: publicUser(usr) }, 'application/json', { 'Set-Cookie': sessionCookie(req, token, SESSION_TTL / 1000) });
       }
       if (p === '/api/logout' && req.method === 'POST') {
-        const t = cookies(req).sid; if (t && db.sessions[t]) { delete db.sessions[t]; await store.del('sessions', t); }
+        if (user) { user.sv = (user.sv || 0) + 1; await saveUser(user); } // revoke every cookie issued so far
         return send(res, 200, { ok: true }, 'application/json', { 'Set-Cookie': sessionCookie(req, '', 0) });
       }
       if (p === '/api/me') {
@@ -819,7 +1013,12 @@ const server = http.createServer(async (req, res) => {
         const q = Object.fromEntries(u.searchParams);
         const pct = Number(q.percent) > 0 ? Number(q.percent) : AL.DEFAULT_PERCENT;
         let a, cm;
-        if (q.source === 'tcgdex') {
+        if (q.source === 'cardprice') {
+          if (!cpIdOk(q.cpId)) return send(res, 404, { error: 'Unknown card' });
+          const field = AL.CP_FIELDS[q.field] ? q.field : 'raw';
+          a = { source: 'cardprice', cpId: q.cpId, field, currency: 'USD' };
+          return send(res, 200, { ...(await quoteAny({ ...a, mode: field === 'raw' ? 'percent' : 'target', percent: pct, target: Number(q.target) || null })), currency: 'USD', field, fieldLabel: AL.CP_FIELDS[field], subType: null });
+        } else if (q.source === 'tcgdex') {
           const lang = ['zh-tw', 'zh-cn'].includes(q.lang) ? q.lang : null;
           const c = lang && await L.tcgdexCard(lang, String(q.tcgdexId || '')).catch(() => null);
           if (!c) return send(res, 404, { error: 'Unknown card' });
@@ -838,7 +1037,7 @@ const server = http.createServer(async (req, res) => {
         const all = Object.values(await store.all('alerts'));
         if (req.method === 'GET') {
           await withHistory();
-          const mine = all.filter(a => a.profile === user.username).map(a => ({ ...a, ...quoteFor(a) }));
+          const mine = await Promise.all(all.filter(a => a.profile === user.username).map(async a => ({ ...a, ...(await quoteAny(a)) })));
           return send(res, 200, { alerts: mine });
         }
         if (req.method === 'POST') {
@@ -850,7 +1049,17 @@ const server = http.createServer(async (req, res) => {
           if (mode === 'percent' && !(percent >= 1 && percent <= 99)) return send(res, 400, { error: 'Percent of average must be between 1 and 99' });
           const rule = { mode, target, percent: percent == null ? null : Math.round(percent * 10) / 10 };
           let item;
-          if (b.source === 'tcgdex') {
+          if (b.source === 'cardprice') {
+            if (!cpIdOk(b.cpId)) return send(res, 400, { error: 'Unknown card' });
+            const field = AL.CP_FIELDS[b.field] ? b.field : 'raw';
+            if (field !== 'raw' && mode !== 'target') return send(res, 400, { error: 'Graded-price alerts need a fixed target price (there is no graded price history to average).' });
+            const info = await cpInfo(b.cpId).catch(() => null);
+            if (!info?.found) return send(res, 400, { error: 'CardPrice has no record of this card' });
+            const cur = EVENTS.cards.find(e => e.cpId === b.cpId), tcg = /^tcg-(\d+)$/.exec(b.cpId), tc = tcg && state.byId.get(+tcg[1]);
+            item = { kind: 'card', source: 'cardprice', cpId: b.cpId, field, productId: tc ? tc.id : null, subType: null, name: `${cur?.name || tc?.name || info.name} — ${AL.CP_FIELDS[field]}`,
+              set: cur?.set || (tc && state.groupByKey.get(gkey(tc.cat, tc.groupId))?.name) || 'CardPrice', language: cur?.lang || tc?.lang || 'ja', currency: 'USD',
+              priceField: `CardPrice ${AL.CP_FIELDS[field]} price (thin data: ${info.sales ? `${info.sales.count90d} recorded sale${info.sales.count90d === 1 ? '' : 's'} in 90 days` : 'no recorded sales'})`, url: info.url, img: cur?.img || tc?.img || null };
+          } else if (b.source === 'tcgdex') {
             const lang = ['zh-tw', 'zh-cn'].includes(b.lang) ? b.lang : null;
             const c = lang && await L.tcgdexCard(lang, String(b.tcgdexId || '')).catch(() => null);
             if (!c) return send(res, 400, { error: 'Unknown card' });
@@ -872,12 +1081,12 @@ const server = http.createServer(async (req, res) => {
             const edl = editionLabel(c, edOf(sub));
             item = { kind: 'card', source: 'tcgcsv', category: g.cat, groupId: g.groupId, productId: c.id, subType: sub, name: edl ? `${c.name} — ${edl}` : c.name, edition: edl, set: g.name, language: g.lang, currency: 'USD', priceField: 'TCGplayer market (mid if no market)', url: c.url, img: c.img };
           }
-          const existing = all.find(a => a.profile === user.username && a.source === item.source && (item.source === 'tcgdex' ? a.tcgdexId === item.tcgdexId : a.productId === item.productId && a.subType === item.subType && a.kind === item.kind));
+          const existing = all.find(a => a.profile === user.username && a.source === item.source && (item.source === 'tcgdex' ? a.tcgdexId === item.tcgdexId : item.source === 'cardprice' ? a.cpId === item.cpId && a.field === item.field : a.productId === item.productId && a.subType === item.subType && a.kind === item.kind));
           let saved;
           if (existing) await store.put('alerts', existing.id, saved = { ...existing, ...rule, notified: false, updatedAt: new Date().toISOString() });
           else { const id = crypto.randomBytes(6).toString('hex'); await store.put('alerts', id, saved = { id, profile: user.username, ...item, ...rule, notified: false, createdAt: new Date().toISOString() }); }
           await withHistory();
-          return send(res, 200, { ok: true, alert: { ...saved, ...quoteFor(saved) } });
+          return send(res, 200, { ok: true, alert: { ...saved, ...(await quoteAny(saved)) } });
         }
         if (req.method === 'DELETE') {
           const id = u.searchParams.get('id');
@@ -914,6 +1123,7 @@ server.listen(PORT, '0.0.0.0', () => log(`Listening on port ${PORT} (${PROD ? 'p
   L.eurUsd().then(f => log(`EUR->USD ${f.rate} (${f.date || f.source})`)).catch(() => {});
   setInterval(() => L.eurUsd().catch(() => {}), 6 * 3600e3);
   refresh(); // background: the site serves the saved index meanwhile
+  setTimeout(() => refreshCurated().catch(() => {}), 5000); setInterval(() => refreshCurated().catch(() => {}), GRADED_TTL);
   setInterval(refresh, 60 * 60 * 1000); // TCGCSV refreshes ~daily (~20:00 UTC); only re-pull when its stamp changes
 })().catch(e => { log('startup failed:', e.stack || e.message); process.exit(1); });
 

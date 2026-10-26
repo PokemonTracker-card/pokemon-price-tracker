@@ -1,0 +1,367 @@
+{
+ "about": "Ultra-rare tournament/contest prize cards that TCGplayer (TCGCSV) doesn't list. Identifiers are CardPrice card ids (api.cardprice.com/api/card/<cpId>, set 'Trophy & Prize Cards (Japanese)'); prices are fetched live from CardPrice — nothing here is a price. reportedSales are cited one-off public sales, shown separately from tracked data.",
+ "cards": [
+  {
+   "cpId": "spx-family-event-kangaskhan",
+   "name": "Kangaskhan (Family Event Trophy)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": "Kangaskhan",
+   "img": "https://archives.bulbagarden.net/media/upload/f/f9/KangaskhanParentChildTournamentpromo.jpg",
+   "slug": "kangaskhan-family-event-trophy-trophy-and-prize-cards-japanese",
+   "pricechartingId": 6149055,
+   "aliases": [
+    "kangaskhan family event",
+    "parent child kangaskhan",
+    "kangaskhan trophy"
+   ]
+  },
+  {
+   "cpId": "spx-grand-party",
+   "name": "Grand Party (Passport Challenge)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": null,
+   "img": "https://archives.bulbagarden.net/media/upload/7/79/TrainerCertificationCardPromo.jpg",
+   "slug": "grand-party-passport-challenge-trophy-and-prize-cards-japanese",
+   "pricechartingId": 2740819,
+   "aliases": [
+    "grand party trainer",
+    "grand party pokemon card"
+   ]
+  },
+  {
+   "cpId": "spx-masters-key",
+   "name": "Master's Key (Finalist Trophy)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": null,
+   "img": "https://archives.bulbagarden.net/media/upload/3/3d/MasterKeyLPromo68.jpg",
+   "slug": "masters-key-finalist-trophy-trophy-and-prize-cards-japanese-68-l-p",
+   "pricechartingId": 10647412,
+   "aliases": [
+    "masters key",
+    "master key pokemon",
+    "master's key trophy"
+   ]
+  },
+  {
+   "cpId": "spx-snap-articuno",
+   "name": "Articuno (64 Mario Stadium Snap Contest)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": "Articuno",
+   "img": "https://archives.bulbagarden.net/media/upload/d/d5/ArticunoSnapBestPhotoContest.jpg",
+   "slug": "articuno-64-mario-stadium-snap-contest-trophy-and-prize-cards-japanese",
+   "pricechartingId": 14103053,
+   "aliases": [
+    "snap articuno",
+    "pokemon snap card articuno"
+   ]
+  },
+  {
+   "cpId": "spx-snap-bulbasaur",
+   "name": "Bulbasaur (Snap Best Photo Contest)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": "Bulbasaur",
+   "img": "https://archives.bulbagarden.net/media/upload/3/33/BulbasaurSnapBestPhotoContest.jpg",
+   "slug": "bulbasaur-snap-best-photo-contest-trophy-and-prize-cards-japanese",
+   "pricechartingId": 14102283,
+   "aliases": [
+    "snap bulbasaur",
+    "pokemon snap card bulbasaur"
+   ]
+  },
+  {
+   "cpId": "spx-snap-chansey",
+   "name": "Chansey (64 Mario Stadium Snap Contest)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": "Chansey",
+   "img": "https://archives.bulbagarden.net/media/upload/7/71/ChanseySnapBestPhotoContest.jpg",
+   "slug": "chansey-64-mario-stadium-snap-contest-trophy-and-prize-cards-japanese",
+   "pricechartingId": 14103052,
+   "aliases": [
+    "snap chansey",
+    "pokemon snap card chansey"
+   ]
+  },
+  {
+   "cpId": "spx-snap-charmander",
+   "name": "Charmander (64 Mario Stadium Snap Contest)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": "Charmander",
+   "img": "https://archives.bulbagarden.net/media/upload/9/94/CharmanderSnapBestPhotoContest.jpg",
+   "slug": "charmander-64-mario-stadium-snap-contest-trophy-and-prize-cards-japanese",
+   "pricechartingId": 14102286,
+   "aliases": [
+    "snap charmander",
+    "pokemon snap card charmander"
+   ]
+  },
+  {
+   "cpId": "spx-snap-gyarados",
+   "name": "Gyarados (Snap Best Photo Contest)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": "Gyarados",
+   "img": "https://archives.bulbagarden.net/media/upload/8/81/GyaradosSnapBestPhotoContest.jpg",
+   "slug": "gyarados-snap-best-photo-contest-trophy-and-prize-cards-japanese",
+   "pricechartingId": null,
+   "aliases": [
+    "snap gyarados",
+    "pokemon snap card gyarados"
+   ]
+  },
+  {
+   "cpId": "spx-snap-koffing",
+   "name": "Koffing (64 Mario Stadium Snap Contest)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": "Koffing",
+   "img": "https://archives.bulbagarden.net/media/upload/d/d9/KoffingSnapBestPhotoContest.jpg",
+   "slug": "koffing-64-mario-stadium-snap-contest-trophy-and-prize-cards-japanese",
+   "pricechartingId": 12350597,
+   "aliases": [
+    "snap koffing",
+    "pokemon snap card koffing"
+   ]
+  },
+  {
+   "cpId": "spx-snap-magikarp",
+   "name": "Magikarp (Snap Best Photo Contest)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": "Magikarp",
+   "img": "https://archives.bulbagarden.net/media/upload/e/e3/MagikarpSnapBestPhotoContest.jpg",
+   "slug": "magikarp-snap-best-photo-contest-trophy-and-prize-cards-japanese",
+   "pricechartingId": null,
+   "aliases": [
+    "snap magikarp",
+    "pokemon snap card magikarp"
+   ]
+  },
+  {
+   "cpId": "spx-snap-pikachu",
+   "name": "Pikachu (Snap Best Photo Contest)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": "Pikachu",
+   "img": "https://archives.bulbagarden.net/media/upload/f/f7/PikachuSnapBestPhotoContest.jpg",
+   "slug": "pikachu-snap-best-photo-contest-trophy-and-prize-cards-japanese",
+   "pricechartingId": 8213128,
+   "aliases": [
+    "snap pikachu",
+    "pokemon snap card pikachu"
+   ]
+  },
+  {
+   "cpId": "spx-snap-poliwag",
+   "name": "Poliwag (Snap Best Photo Contest)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": "Poliwag",
+   "img": "https://archives.bulbagarden.net/media/upload/8/84/PoliwagSnapBestPhotoContest.jpg",
+   "slug": "poliwag-snap-best-photo-contest-trophy-and-prize-cards-japanese",
+   "pricechartingId": 14103054,
+   "aliases": [
+    "snap poliwag",
+    "pokemon snap card poliwag"
+   ]
+  },
+  {
+   "cpId": "spx-snap-squirtle",
+   "name": "Squirtle (64 Mario Stadium Snap Contest)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": "Squirtle",
+   "img": "https://archives.bulbagarden.net/media/upload/5/5d/SquirtleSnapBestPhotoContest.jpg",
+   "slug": "squirtle-64-mario-stadium-snap-contest-trophy-and-prize-cards-japanese",
+   "pricechartingId": 14103049,
+   "aliases": [
+    "snap squirtle",
+    "pokemon snap card squirtle"
+   ]
+  },
+  {
+   "cpId": "spx-ssb-no1-trainer",
+   "name": "No. 1 Trainer (Secret Super Battle)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": null,
+   "img": "https://archives.bulbagarden.net/media/upload/f/fb/SecretSuperBattleNo1.jpg",
+   "slug": "no-1-trainer-secret-super-battle-trophy-and-prize-cards-japanese",
+   "pricechartingId": null,
+   "aliases": [
+    "no 1 trainer mewtwo",
+    "super secret battle trainer",
+    "secret super battle no 1"
+   ]
+  },
+  {
+   "cpId": "spx-ssb-no2-trainer",
+   "name": "No. 2 Trainer (Secret Super Battle)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": null,
+   "img": "https://archives.bulbagarden.net/media/upload/b/ba/SecretSuperBattleNo2.jpg",
+   "slug": "no-2-trainer-secret-super-battle-trophy-and-prize-cards-japanese",
+   "pricechartingId": 13643765,
+   "aliases": [
+    "no 2 trainer mewtwo",
+    "secret super battle no 2"
+   ]
+  },
+  {
+   "cpId": "spx-ssb-no3-trainer",
+   "name": "No. 3 Trainer (Secret Super Battle)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": null,
+   "img": "https://archives.bulbagarden.net/media/upload/8/83/SecretSuperBattleNo3.jpg",
+   "slug": "no-3-trainer-secret-super-battle-trophy-and-prize-cards-japanese",
+   "pricechartingId": null,
+   "aliases": [
+    "no 3 trainer mewtwo",
+    "secret super battle no 3"
+   ]
+  },
+  {
+   "cpId": "spx-tamamushi-magikarp",
+   "name": "Magikarp (Tamamushi University)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": "Magikarp",
+   "img": "https://archives.bulbagarden.net/media/upload/4/4f/MagikarpUniversityPromo.jpg",
+   "slug": "magikarp-tamamushi-university-trophy-and-prize-cards-japanese",
+   "pricechartingId": 6149058,
+   "aliases": [
+    "tamamushi magikarp",
+    "university magikarp",
+    "tamamushi university magikarp"
+   ]
+  },
+  {
+   "cpId": "spx-trophy-pikachu-no1-gold",
+   "name": "Trophy Pikachu No. 1 Trainer (Gold)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": "Pikachu",
+   "img": "https://archives.bulbagarden.net/media/upload/9/90/100_T_NO1TRAINER1.jpg",
+   "slug": "trophy-pikachu-no-1-trainer-gold-trophy-and-prize-cards-japanese",
+   "pricechartingId": 2740818,
+   "aliases": [
+    "trophy pikachu",
+    "gold trophy pikachu",
+    "no 1 trainer pikachu",
+    "pikachu gold trophy"
+   ]
+  },
+  {
+   "cpId": "spx-trophy-pikachu-no2-silver",
+   "name": "Trophy Pikachu No. 2 Trainer (Silver)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": "Pikachu",
+   "img": "https://archives.bulbagarden.net/media/upload/c/c3/100_T_NO2TRAINER1.jpg",
+   "slug": "trophy-pikachu-no-2-trainer-silver-trophy-and-prize-cards-japanese",
+   "pricechartingId": null,
+   "aliases": [
+    "trophy pikachu silver",
+    "silver trophy pikachu",
+    "no 2 trainer pikachu"
+   ]
+  },
+  {
+   "cpId": "spx-trophy-pikachu-no3-bronze",
+   "name": "Trophy Pikachu No. 3 Trainer (Bronze)",
+   "set": "Trophy & Prize Cards (Japanese)",
+   "lang": "ja",
+   "kind": "prize",
+   "pokemon": "Pikachu",
+   "img": "https://archives.bulbagarden.net/media/upload/b/b6/100_T_NO3TRAINER1.jpg",
+   "slug": "trophy-pikachu-no-3-trainer-bronze-trophy-and-prize-cards-japanese",
+   "pricechartingId": 13633575,
+   "aliases": [
+    "trophy pikachu bronze",
+    "bronze trophy pikachu",
+    "no 3 trainer pikachu"
+   ]
+  }
+ ],
+ "tcgplayer": {
+  "617427": {
+   "aliases": [
+    "pikachu illustrator",
+    "illustrator pikachu",
+    "trophy",
+    "prize",
+    "contest",
+    "corocoro",
+    "1998"
+   ],
+   "pokemon": "Pikachu",
+   "kind": "prize",
+   "note": "1998 CoroCoro Comic illustration-contest prize — 39 copies awarded (Guinness World Records).",
+   "pricecharting": "https://www.pricecharting.com/game/pokemon-japanese-promo/illustrator-pikachu",
+   "reportedSales": [
+    {
+     "date": "2026-02-16",
+     "grade": "PSA 10",
+     "price": 16492000,
+     "venue": "Goldin auction (incl. buyer's premium)",
+     "source": "Guinness World Records",
+     "url": "https://www.guinnessworldrecords.com/world-records/452634-most-expensive-pokemon-trading-card-sold-at-auction"
+    },
+    {
+     "date": "2021-07-22",
+     "grade": "PSA 10",
+     "price": 5275000,
+     "venue": "Private trade, Dubai ($4M cash + a PSA 9 Illustrator)",
+     "source": "Guinness World Records",
+     "url": "https://www.guinnessworldrecords.com/world-records/695893-most-expensive-pokemon-trading-card-sold-at-a-private-sale"
+    },
+    {
+     "date": "2021",
+     "grade": "PSA 9",
+     "price": 1275000,
+     "venue": "Private sale (Matt Allen to Logan Paul)",
+     "source": "Guinness World Records",
+     "url": "https://www.guinnessworldrecords.com/news/2022/7/the-5-million-pokemon-card-inside-logan-pauls-record-breaking-trade-708581"
+    }
+   ],
+   "pin": true
+  },
+  "617220": {
+   "aliases": [
+    "illustrator",
+    "corrected",
+    "corocoro"
+   ],
+   "pokemon": "Pikachu",
+   "kind": "prize",
+   "note": "A separate TCGplayer listing (CoroCoro Promotional Cards) from the original 1998 Pokemon Illustrator (#617427); check the listing photos before buying."
+  }
+ }
+}

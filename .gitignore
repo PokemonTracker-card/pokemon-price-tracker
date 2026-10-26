@@ -9,6 +9,7 @@ npm-debug.log*
 # (only the sourced pull-rate table in data/ is part of the app)
 data/*
 !data/pull-rates.json
+!data/event-cards.json
 
 # secrets / local env
 .env

@@ -146,3 +146,14 @@ table.gt td:first-child{white-space:nowrap}
 .badge.ed1{background:linear-gradient(135deg,#111,#2b2b2b);color:#fff;border:1px solid #facc15;font-weight:800;left:auto;right:8px;top:auto;bottom:8px}
 .badge.ed1.inl{position:static;display:inline-block;vertical-align:middle;font-size:12px;padding:2px 7px;border-radius:6px}
 .edl{font-size:12px;color:#8b93ab;margin-top:2px}.edl.first{color:#facc15;font-weight:700}.edl.big{font-size:14px;margin:-4px 0 8px}
+.badge.ev{top:auto;bottom:8px;left:8px;font-size:11px;color:#fde68a;border-color:#a16207}
+.badge.ev.event{color:#a5f3fc;border-color:#0e7490}
+.badge.inl{position:static;display:inline-block;vertical-align:middle}
+.evnote{margin:6px 0 10px;font-size:13px;color:#e7eaf3}
+.salesrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:4px}
+.pill{border-radius:999px;padding:2px 10px;font-size:12px;font-weight:700}
+.pill.few{background:rgba(245,158,11,.15);color:#fbbf24;border:1px solid #b45309}
+.pill.ok{background:rgba(34,197,94,.12);color:#4ade80;border:1px solid #15803d}
+.est{font-size:10.5px;color:#fbbf24;border:1px dashed #b45309;border-radius:4px;padding:0 4px;margin-left:4px}
+.est.bad{color:#f87171;border-color:#b91c1c}
+.reported{margin-top:12px;padding:10px;border:1px solid #6d28d9;border-radius:10px;background:rgba(109,40,217,.08)}
