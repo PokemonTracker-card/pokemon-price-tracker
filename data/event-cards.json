@@ -204,7 +204,7 @@
    "set": "Trophy & Prize Cards (Japanese)",
    "lang": "ja",
    "kind": "prize",
-   "pokemon": null,
+   "pokemon": "Mewtwo",
    "img": "https://archives.bulbagarden.net/media/upload/f/fb/SecretSuperBattleNo1.jpg",
    "slug": "no-1-trainer-secret-super-battle-trophy-and-prize-cards-japanese",
    "pricechartingId": null,
@@ -220,7 +220,7 @@
    "set": "Trophy & Prize Cards (Japanese)",
    "lang": "ja",
    "kind": "prize",
-   "pokemon": null,
+   "pokemon": "Mewtwo",
    "img": "https://archives.bulbagarden.net/media/upload/b/ba/SecretSuperBattleNo2.jpg",
    "slug": "no-2-trainer-secret-super-battle-trophy-and-prize-cards-japanese",
    "pricechartingId": 13643765,
@@ -235,7 +235,7 @@
    "set": "Trophy & Prize Cards (Japanese)",
    "lang": "ja",
    "kind": "prize",
-   "pokemon": null,
+   "pokemon": "Mewtwo",
    "img": "https://archives.bulbagarden.net/media/upload/8/83/SecretSuperBattleNo3.jpg",
    "slug": "no-3-trainer-secret-super-battle-trophy-and-prize-cards-japanese",
    "pricechartingId": null,
@@ -311,6 +311,16 @@
   }
  ],
  "tcgplayer": {
+  "617220": {
+   "aliases": [
+    "illustrator",
+    "corrected",
+    "corocoro"
+   ],
+   "pokemon": "Pikachu",
+   "kind": "prize",
+   "note": "A separate TCGplayer listing (CoroCoro Promotional Cards) from the original 1998 Pokemon Illustrator (#617427); check the listing photos before buying."
+  },
   "617427": {
    "aliases": [
     "pikachu illustrator",
@@ -352,16 +362,16 @@
     }
    ],
    "pin": true
-  },
-  "617220": {
-   "aliases": [
-    "illustrator",
-    "corrected",
-    "corocoro"
-   ],
-   "pokemon": "Pikachu",
-   "kind": "prize",
-   "note": "A separate TCGplayer listing (CoroCoro Promotional Cards) from the original 1998 Pokemon Illustrator (#617427); check the listing photos before buying."
   }
+ },
+ "speciesAliases": {
+  "_about": "Name fragments (normalized: lowercase, punctuation as spaces) that identify the Pokémon on a prize/event card whose name does not contain the species. Applied to prize/event cards only, after stripping trophy/placement/staff/prize prefixes.",
+  "pokemon illustrator": "Pikachu",
+  "illustrator pikachu": "Pikachu",
+  "tamamushi": "Magikarp",
+  "family event": "Kangaskhan",
+  "parent child": "Kangaskhan",
+  "oyako": "Kangaskhan",
+  "secret super battle": "Mewtwo"
  }
 }

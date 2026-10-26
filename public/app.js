@@ -28,6 +28,9 @@ const fxNote = cm => `converted from EUR at 1 EUR = $${(cm?.eurRate || S.status?
 const priceLabel = c => { if (c.source === 'tcgdex') return 'Cardmarket trend · converted from EUR'; if (c.source === 'cardprice') return `raw · ${(c.cp?.latestSource || 'CardPrice').replace(' (via CardPrice)', ' via CardPrice')} · thin data`; const v = bestVariant(c); return v ? (v.market != null ? `market · ${v.sub}` : `asking only (listing mid, no recent sale) · ${v.sub}`) : ''; };
 const evBadge = c => c.event ? `<span class="badge ev ${c.event.kind}">${c.event.kind === 'prize' ? '🏆 ' : '🎟 '}${esc(c.event.label)}</span>` : '';
 const noTcgPrice = c => c.source === 'tcgcsv' && !c.prices.some(p => p.market != null || p.mid != null);
+// Sort key: the card's own price, else the server's fallback (curated prize cards: highest recorded graded value / CardPrice raw).
+const evRank = c => c.event?.kind === 'prize' ? 2 : c.event ? 1 : 0;
+const sortVal = c => cardPrice(c) ?? c.sortRef?.price ?? null;
 const hasMarket = c => c.source === 'tcgcsv' && c.prices.some(p => p.market != null);
 const packPrice = p => p ? (p.market ?? p.mid ?? null) : null;
 
@@ -153,12 +156,13 @@ $('#scaleSeg').addEventListener('click', e => { const b = e.target.closest('butt
 
 function filtered() {
   const f = $('#filter').value.trim().toLowerCase();
-  let list = S.cards.filter(c => !f || `${c.name} ${c.set.name} ${c.rarity || ''} ${c.number || ''}`.toLowerCase().includes(f));
-  if ($('#pricedOnly').checked) list = list.filter(c => cardPrice(c) != null);
+  let list = S.cards.filter(c => !f || `${c.name} ${c.set.name} ${c.rarity || ''} ${c.number || ''} ${c.event ? c.event.label + ' event' : ''}`.toLowerCase().includes(f));
+  // Prize/event cards stay visible under "Priced only" even when nobody has priced them (they sort after priced cards).
+  if ($('#pricedOnly').checked) list = list.filter(c => sortVal(c) != null || c.event);
   const date = c => c.set.released ? Date.parse(c.set.released) : 0;
   const sorts = {
-    price: (a, b) => (cardPrice(b) ?? -1) - (cardPrice(a) ?? -1), // most expensive first, unpriced last
-    priceAsc: (a, b) => (cardPrice(a) ?? 1e12) - (cardPrice(b) ?? 1e12),
+    price: (a, b) => (sortVal(b) ?? -1) - (sortVal(a) ?? -1) || evRank(b) - evRank(a), // most expensive first (graded fallback for prize cards); unpriced last, prize/trophy cards first among those
+    priceAsc: (a, b) => (sortVal(a) ?? 1e12) - (sortVal(b) ?? 1e12),
     newest: (a, b) => date(b) - date(a), oldest: (a, b) => (date(a) || 1e15) - (date(b) || 1e15),
     pull: (a, b) => (b.pull?.specificOneIn || 0) - (a.pull?.specificOneIn || 0),
   };
@@ -173,7 +177,7 @@ function cardTile(c, idx) {
       <div class="body">
         <div class="name">${esc(c.name)}</div>${c.editionLabel ? `<div class="edl ${c.edition === '1st' ? 'first' : ''}">${esc(c.editionLabel)}</div>` : ''}
         <div class="set">${esc(c.set.name)}${c.number ? ' · #' + esc(c.number) : ''}</div>
-        ${pr != null ? `<div class="price">${fmt(pr, cur)}<small>${esc(priceLabel(c))}</small></div>` : c.source === 'cardprice' ? `<div class="price na">${c.cp?.suspicious ? 'No reliable raw price' : 'No sales data'}<small>${c.event?.curated ? 'not on TCGplayer · open for graded values &amp; links' : ''}</small></div>` : c.event ? '<div class="price na">No TCGplayer price<small>open for sale history, CardPrice data &amp; links</small></div>' : '<div class="price na">No current price</div>'}
+        ${pr != null ? `<div class="price">${fmt(pr, cur)}<small>${esc(priceLabel(c))}</small></div>` : c.sortRef ? `<div class="price" title="Sorted by this value: no usable raw price">${fmt(c.sortRef.price)}<small>${esc(c.sortRef.label)}</small></div>` : c.source === 'cardprice' ? `<div class="price na">${c.cp?.suspicious ? 'No reliable raw price' : 'No sales data'}<small>${c.event?.curated ? 'not on TCGplayer · open for graded values &amp; links' : ''}</small></div>` : c.event ? '<div class="price na">No TCGplayer price<small>open for sale history, CardPrice data &amp; links</small></div>' : '<div class="price na">No current price</div>'}
         <div class="pull">${c.pull?.known ? `🎲 ${esc(c.pull.tier)}: 1 in ${c.pull.tierOneIn} packs${c.pull.specificOneIn ? ` · this card ≈1 in ${c.pull.specificOneIn.toLocaleString()}` : ''}` : '<span class="muted">🎲 Pull rate unknown</span>'}</div>
         <div class="packrow">${c.pack ? `${c.pack.img ? `<img src="${esc(c.pack.img)}" alt="" loading="lazy">` : ''}<span>Pack: <b>${pp != null ? fmt(pp) : 'no recent sales'}</b><br><span class="muted">${esc(c.pack.name.length > 38 ? c.pack.name.slice(0, 36) + '…' : c.pack.name)}</span></span>` : `<span class="muted">${esc(c.packNote || 'No pack price')}</span>`}</div>
       </div></article>`;

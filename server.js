@@ -357,16 +357,95 @@ function editionQuery(q) {
     .replace(/\bunlimited\b/gi, () => { ed = ed || 'unl'; return ' '; }).replace(/\s+/g, ' ').trim();
   return { q, ed };
 }
+// ---------- Pokémon -> prize/event card mapping ----------
+// The category list for a Pokémon is "cards whose name contains the species" plus the cards that rule misses:
+//  - curated CardPrice-only prize cards with an explicit `pokemon` field (data/event-cards.json cards[]),
+//  - curated TCGplayer listings with a `pokemon` field (event-cards.json tcgplayer{}),
+//  - prize/event cards whose name only carries an alias (event-cards.json speciesAliases, e.g. "Pokemon Illustrator" -> Pikachu)
+//    or a Japanese species name (data/species-ja.json, from PokeAPI),
+//  - Pokémon cards TCGplayer lists without HP/stage (we flag those as Trainer/Energy) whose name is just
+//    "<prefixes> <species> <form suffix>", e.g. "Venusaur (Trade Please campaign)", "Zacian V", "Trophy Pikachu".
+// Built lazily once per price index; only the extra cards are stored (species -> card idx), so memory stays tiny.
+const SPECIES_JA = L.readJSON(path.join(L.ROOT, 'data', 'species-ja.json'), { names: {} }).names || {};
+const EV_PREFIX = new Set(['trophy', 'no', 'number', '1', '2', '3', '1st', '2nd', '3rd', 'staff', 'prize', 'winner', 'worlds', 'world', 'championship', 'championships', 'champion', 'snap', 'corrected', 'illustrator', 'secret', 'super', 'battle', 'gold', 'silver', 'bronze', 'shining', 'radiant', 'flying', 'surfing', 'shadow', 'dark', 'light', 'detective', 'birthday', 'jumbo']);
+const FORM_SUFFIX = new Set(['ex', 'v', 'gx', 'vmax', 'vstar', 'vunion', 'lv', 'x', 'prime', 'legend', 'break', 'star', 'delta', 'e', 'g', 'gl', 'fb', 'c', '4', 'sp', 'm', 'mega', 'tag', 'team', 'trophy', 'prize', 'staff', 'winner', 'promo', 'jumbo']);
+const baseName = n => norm(String(n).replace(/\s-\s.*$/, '').replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')).trim().split(' ').filter(Boolean);
+let speciesIx = null; // { cards, pokemon, ev, byName: Map(normName -> Set(idx)), curated: Map(normName -> [entries]), mapped, unmapped }
+function speciesIndex() {
+  if (speciesIx && speciesIx.cards === state.cards && speciesIx.pokemon === state.pokemon && speciesIx.ev === CS.ev) return speciesIx;
+  const t0 = Date.now(), names = new Map(), ja = [];
+  for (const p of state.pokemon || []) { const k = norm(p.name).trim(); if (k) names.set(k, p.name); for (const j of SPECIES_JA[p.id] || []) if (j.length >= 2) ja.push([j, k]); }
+  const aliases = Object.entries(EVENTS.speciesAliases || {}).filter(([k, v]) => !k.startsWith('_') && v).map(([k, v]) => [` ${norm(k).trim()} `, norm(v).trim()]);
+  const maxW = Math.max(1, ...[...names.keys()].map(k => k.split(' ').length));
+  const add = (m, k, v) => { let x = m.get(k); if (!x) m.set(k, x = new Set()); x.add(v); };
+  // species named by a stripped name: optional prefixes, one species, then only form suffixes
+  const strictSpecies = toks => {
+    let i = 0; while (i < toks.length && EV_PREFIX.has(toks[i]) && !names.has(toks[i])) i++;
+    for (let w = Math.min(maxW, toks.length - i); w >= 1; w--) {
+      const k = toks.slice(i, i + w).join(' ');
+      if (names.has(k) && toks.slice(i + w).every(t => FORM_SUFFIX.has(t) || /^\d+$/.test(t))) return k;
+    }
+    return null;
+  };
+  const speciesFor = (text, raw) => { // all species an event card's text points at (aliases + Japanese names + strict form)
+    const out = new Set(), t = ` ${norm(text).trim()} `;
+    for (const [a, sp] of aliases) if (t.includes(a)) out.add(sp);
+    if (CJK.test(raw)) for (const [j, k] of ja) if (raw.includes(j)) out.add(k);
+    return out;
+  };
+  const byName = new Map(), byId = new Map(); let extra = 0;
+  state.cards.forEach((c, i) => {
+    const kind = CS.ev?.get(c.id), cur = EVENTS.tcgplayer?.[c.id];
+    const sp = new Set();
+    if (cur?.pokemon) for (const p of [].concat(cur.pokemon)) sp.add(norm(p).trim());
+    if (kind) for (const k of speciesFor(`${c.name} ${(cur?.aliases || []).join(' ')}`, c.name)) sp.add(k);
+    if (c.t) { const k = strictSpecies(baseName(c.name)); if (k) sp.add(k); }
+    if ((!c.t || kind) && /['’]s\b/i.test(c.name)) for (const m of c.name.matchAll(/([A-Za-z0-9.\- ]+?)['’]s\b/g)) { // "Pikachu's Summer Vacation": norm() fuses the possessive
+      const w = norm(m[1]).trim().split(' '); for (let n = Math.min(maxW, w.length); n >= 1; n--) { const k = w.slice(-n).join(' '); if (names.has(k)) { sp.add(k); break; } }
+    }
+    for (const k of sp) if (c.t || !c.n.includes(` ${k} `)) { add(byName, k, i); if (!byId.has(c.id)) byId.set(c.id, k); extra++; }
+  });
+  const curated = new Map(), unmapped = [];
+  for (const e of EVENTS.cards) {
+    const sp = new Set([].concat(e.pokemon || []).map(p => norm(p).trim()));
+    if (!sp.size) { for (const k of speciesFor([e.name, ...(e.aliases || [])].join(' '), e.name)) sp.add(k); const k = strictSpecies(baseName(e.name)); if (k) sp.add(k); }
+    if (!sp.size) unmapped.push(e.name);
+    for (const k of sp) { if (!curated.has(k)) curated.set(k, []); curated.get(k).push(e); }
+  }
+  speciesIx = { cards: state.cards, pokemon: state.pokemon, ev: CS.ev, byName, byId, names, curated, unmapped, extra, curatedMapped: EVENTS.cards.length - unmapped.length };
+  log(`Species map: ${extra} extra card links (${byName.size} species) beyond name matching; curated prize cards mapped ${speciesIx.curatedMapped}/${EVENTS.cards.length}${unmapped.length ? ` (unmapped: ${unmapped.join('; ')})` : ''} in ${Date.now() - t0}ms`);
+  return speciesIx;
+}
+// Sort/display fallback for prize cards with no usable raw price: the highest *recorded* (not estimated) graded value.
+function gradedRef(g) {
+  if (!g) return null; const est = estimatedGrades(g); let best = null;
+  for (const [k, label] of GRADE_ROWS) if (k !== 'ungraded' && typeof g[k] === 'number' && g[k] > 0 && !est.has(k) && (!best || g[k] > best.price)) best = { key: k, label, price: g[k] };
+  return best;
+}
+const curatedTcg = new Map(); // TCGplayer productId (curated) -> cpInfo (refreshed with the CardPrice-only cards)
+// Curated TCGplayer listing with no TCGplayer price -> sort/display on CardPrice's raw price, else the highest recorded graded value.
+function withSortRef(c, es) {
+  const info = EVENTS.tcgplayer?.[c.id] ? curatedTcg.get(c.id) : null;
+  if (!info || c.prices.some(p => p.market != null || p.mid != null)) return es;
+  const g = gradedRef(info.gradedRow);
+  const ref = info.latest != null && !info.suspicious ? { price: info.latest, basis: 'raw', label: `raw · ${info.latestSource}` } : g ? { price: g.price, basis: 'graded', label: `${g.label} graded value · no TCGplayer price` } : null;
+  if (ref) es.forEach(e => { e.sortRef = ref; });
+  return es;
+}
+
 async function search(name, langs) {
   const q = norm(name);
   if (q.trim().length < 2) return { cards: [], notes: [] };
-  const want = new Set(langs);
-  const curated = id => { const pk = EVENTS.tcgplayer[id]?.pokemon; return pk && norm(pk) === q; };
-  const out = state.cards.filter(c => want.has(c.lang) && ((!c.t && c.n.includes(q)) || curated(c.id))).flatMap(c => editionEntries(c));
-  if (want.has('ja')) out.push(...EVENTS.cards.filter(e => e.pokemon && norm(e.pokemon) === q).map(serializeCurated));
+  const want = new Set(langs), qk = q.trim();
+  const SI = speciesIndex(), extraIdx = SI.byName.get(qk) || new Set();
+  const out = state.cards.filter((c, i) => want.has(c.lang) && ((!c.t && c.n.includes(q)) || extraIdx.has(i))).flatMap(c => {
+    const es = editionEntries(c, c.t ? { kind: 'pokemon', dexId: dexFor(c) } : {});
+    return withSortRef(c, es);
+  });
+  if (want.has('ja')) out.push(...(SI.curated.get(qk) || []).map(serializeCurated));
   const mk = c => Math.max(-1, ...c.prices.map(p => p.market ?? -1));
   const mid = c => Math.max(-1, ...c.prices.map(p => p.mid ?? -1));
-  const pr = c => { if (c.source === 'cardprice') return c.cp?.sortPrice ?? -1; const m = mk(c); return m >= 0 ? m : mid(c); };
+  const pr = c => { if (c.source === 'cardprice') return c.cp?.sortPrice ?? c.sortRef?.price ?? -1; const m = mk(c); return m >= 0 ? m : mid(c) >= 0 ? mid(c) : c.sortRef?.price ?? -1; };
   out.sort((a, b) => pr(b) - pr(a));
   const notes = [];
   const zh = langs.filter(l => l.startsWith('zh'));
@@ -490,8 +569,11 @@ function indexCardSearch(toks, want, limit, sort = 'price') {
 let pokemonNorms = null;
 function dexFor(c) {
   const cur = EVENTS.tcgplayer[c.id]?.pokemon;
-  if (cur && state.pokemon.length) return state.pokemon.find(p => p.name === cur)?.id || null;
-  if (c.t || !state.pokemon.length) return null;
+  if (cur && state.pokemon.length) return state.pokemon.find(p => p.name === [].concat(cur)[0])?.id || null;
+  if (!state.pokemon.length) return null;
+  const sk = speciesIndex().byId.get(c.id); // alias / Japanese name / HP-less Pokémon card
+  if (sk) return state.pokemon.find(p => norm(p.name).trim() === sk)?.id || null;
+  if (c.t) return null;
   if (!pokemonNorms || pokemonNorms.src !== state.pokemon) pokemonNorms = { src: state.pokemon, list: state.pokemon.map(p => ({ id: p.id, n: norm(p.name) })).sort((a, b) => b.n.length - a.n.length) };
   return pokemonNorms.list.find(p => c.n.includes(p.n))?.id || null;
 }
@@ -556,7 +638,7 @@ async function cardSearch(q0, langs, { zh = false, limit = 60, sort = 'price' } 
     for (let k = 0; k < toks.length; k++) { const rr = indexCardSearch(toks.filter((_, j) => j !== k), want, limit, sort); if (rr.total && (!best || rr.maxScore > best.r.maxScore)) best = { r: rr, dropped: toks[k].t }; }
     if (best) { r = best.r; notes.push(`No card matches every word — showing matches without “${best.dropped}”.`); }
   }
-  let cards = r.hits.flatMap(h => { const c = state.cards[h.i]; return editionEntries(c, { dexId: dexFor(c), kind: c.t && !EVENTS.tcgplayer[c.id]?.pokemon ? 'trainer' : 'pokemon' }); });
+  let cards = r.hits.flatMap(h => { const c = state.cards[h.i]; return withSortRef(c, editionEntries(c, { dexId: dexFor(c), kind: c.t && !EVENTS.tcgplayer[c.id]?.pokemon && !speciesIndex().byId.has(c.id) ? 'trainer' : 'pokemon' })); });
   if (ed) {
     cards = cards.filter(c => c.edition === ed);
     r = { ...r, total: cards.length };
@@ -566,7 +648,7 @@ async function cardSearch(q0, langs, { zh = false, limit = 60, sort = 'price' } 
   if (want.has('ja') && !ed && toks.length) { const cur = curatedSearch(toks); if (cur.length) { cards.push(...cur); r = { ...r, total: r.total + cur.length }; } }
   const zhLangs = langs.filter(l => l.startsWith('zh'));
   if (zh && zhLangs.length && !ed && !/^\s*[a-z]{0,5}\d+\s*\/\s*[a-z]{0,5}\d+\s*$/i.test(q)) cards.push(...await chineseCardSearch(q, toks, zhLangs, notes));
-  if (sort !== 'match') { const pr = c => c.source === 'tcgdex' ? (c.cardmarket?.current ?? -1) : c.source === 'cardprice' ? (c.cp?.sortPrice ?? -1) : Math.max(-1, ...c.prices.map(p => p.market ?? p.mid ?? -1)); cards.sort((a, b) => pr(b) - pr(a)); }
+  if (sort !== 'match') { const pr = c => c.source === 'tcgdex' ? (c.cardmarket?.current ?? -1) : c.source === 'cardprice' ? (c.cp?.sortPrice ?? c.sortRef?.price ?? -1) : Math.max(c.sortRef?.price ?? -1, ...c.prices.map(p => p.market ?? p.mid ?? -1)); cards.sort((a, b) => pr(b) - pr(a)); }
   // A query that names a curated card exactly (e.g. "pikachu illustrator") pins it first even when it has no price to sort by.
   const qn = norm(q).trim(), pinned = c => c.source === 'tcgcsv' && EVENTS.tcgplayer[c.id]?.pin === true && (EVENTS.tcgplayer[c.id]?.aliases || []).some(a => norm(a).trim() === qn);
   if (cards.some(pinned)) { cards.sort((a, b) => pinned(b) - pinned(a)); notes.push('Exact match pinned first; it has no tracked price, so a price sort would otherwise put it last.'); }
@@ -723,19 +805,23 @@ async function cpIdForProduct(productId) { const card = await cardpriceCard(+pro
 const curatedState = new Map(); // cpId -> info (refreshed daily)
 async function refreshCurated() {
   for (const e of EVENTS.cards) { try { curatedState.set(e.cpId, await cpInfo(e.cpId)); } catch (err) { log('curated refresh failed', e.cpId, err.message); } }
+  for (const id of Object.keys(EVENTS.tcgplayer || {})) { try { const i = await cpInfo(`tcg-${id}`); if (i?.found) curatedTcg.set(+id, i); } catch (err) { log('curated refresh failed', id, err.message); } }
   log(`Curated prize cards: ${EVENTS.cards.length} (${[...curatedState.values()].filter(i => i.latest != null).length} with a CardPrice raw price)`);
 }
 function serializeCurated(e) {
   const i = curatedState.get(e.cpId);
   const sortPrice = i && i.latest != null && !i.suspicious ? i.latest : null;
+  const g = sortPrice == null && i ? gradedRef(i.gradedRow) : null;
+  const sortRef = g ? { price: g.price, basis: 'graded', label: `${g.label} graded value · ${i.suspicious ? 'no reliable raw price' : 'no raw sales'}` } : null;
   return {
     id: `cp:${e.cpId}`, source: 'cardprice', cpId: e.cpId, lang: e.lang, name: e.name, number: null, rarity: 'Prize card', img: e.img,
     url: e.slug ? `https://cardprice.com/card/${e.slug}` : null, kind: 'pokemon',
     set: { id: 'spx-trophy', cat: null, name: e.set, abbr: 'Trophy', released: null }, prices: [],
     cp: i ? { latest: i.latest, latestSource: i.latestSource, suspicious: i.suspicious, sortPrice, thinFlag: i.thinFlag } : { latest: null, sortPrice: null },
     event: { kind: e.kind || 'prize', label: EVENT_LABEL[e.kind || 'prize'], curated: true, note: 'Not listed on TCGplayer — prices come from CardPrice only.' },
+    sortRef,
     pack: null, packNote: 'Awarded as a prize — never sold in booster packs.', pull: { known: false, reason: 'Awarded as a tournament/contest prize, not pulled from packs' }, history: [],
-    dexId: e.pokemon ? state.pokemon.find(p => p.name === e.pokemon)?.id || null : null,
+    dexId: e.pokemon ? state.pokemon.find(p => p.name === [].concat(e.pokemon)[0])?.id || null : null,
     links: { pricecharting: `https://www.pricecharting.com/search-products?type=prices&q=${encodeURIComponent(e.name)}`, ebay: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(e.name.replace(/[()]/g, ''))}&LH_Sold=1&LH_Complete=1`, psa: `https://www.psacard.com/pop/search?q=${encodeURIComponent(e.name.replace(/[()]/g, ''))}` },
   };
 }

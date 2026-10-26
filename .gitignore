@@ -10,6 +10,7 @@ npm-debug.log*
 data/*
 !data/pull-rates.json
 !data/event-cards.json
+!data/species-ja.json
 
 # secrets / local env
 .env
