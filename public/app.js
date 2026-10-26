@@ -4,7 +4,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const LANG = { en: '🇺🇸 EN', ja: '🇯🇵 JP', 'zh-tw': '繁中', 'zh-cn': '简中' };
 const LANGNAME = { en: 'English', ja: 'Japanese', 'zh-tw': 'Chinese (Traditional)', 'zh-cn': 'Chinese (Simplified)' };
 const fmt = (v, cur = 'USD') => v == null ? '—' : new Intl.NumberFormat('en-US', { style: 'currency', currency: cur, maximumFractionDigits: v >= 1000 ? 0 : 2 }).format(v);
-const S = { pokemon: [], current: null, cards: [], lang: 'all', shown: 48, user: null, chart: null, scale: 'logarithmic', status: null };
+const S = { pokemon: [], current: null, cards: [], lang: 'all', shown: 48, user: null, authPending: true, chart: null, scale: 'logarithmic', status: null };
 
 async function api(path, opts = {}) {
   const r = await fetch(path, { credentials: 'same-origin', ...opts, headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) } });
@@ -198,6 +198,7 @@ document.querySelectorAll('.modal').forEach(m => m.addEventListener('click', e =
 document.addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.modal').forEach(m => !m.hidden && closeModal(m)); });
 
 function alertForm(kind, c, variants) {
+  if (!S.user && S.authPending) return `<div class="muted small" data-authgate>Checking your sign-in…</div>`;
   if (!S.user) return `<div class="muted small">Log in to set a price alert. <a href="#" data-login>Log in</a></div>`;
   const sym = '$';
   if (kind === 'card' && (c.source === 'cardprice' || noTcgPrice(c))) {
@@ -242,6 +243,7 @@ async function refreshQuote(f) {
 }
 function initAlertForms() { document.querySelectorAll('#cardBody .alertform').forEach(refreshQuote); }
 async function openCard(c) {
+  S.reopen = () => openCard(c);
   miniCharts.forEach(ch => ch.destroy()); miniCharts = [];
   const cur = cardCur(c);
   const variants = c.prices.map(p => p.sub);
@@ -400,7 +402,7 @@ async function loadGraded(c) {
     ${c.event || c.source === 'cardprice' ? '<div class="small" style="margin-top:4px">⚠️ Prize/event cards: these values often rest on one or two sales (or a PriceCharting estimate), not a liquid market.</div>' : ''}
     <div class="muted small" style="margin-top:6px">${g.note && g.editionMatched !== false ? esc(g.note) + ' ' : ''}Grades 7–9.5 are the going rate for that grade from any grading company (mostly PSA); the “10” rows are company-specific. USD, updated ${esc(cols[0].date || '—')}. Source: <a href="${esc(g.source.url)}" target="_blank" rel="noopener">CardPrice ↗</a> · also see ${gradedLinks(c)}</div>`;
 }
-$('#cardBody').addEventListener('click', e => { if (e.target.closest('[data-login]')) { e.preventDefault(); showAuth('login'); } });
+$('#cardBody').addEventListener('click', e => { if (e.target.closest('[data-login]')) { e.preventDefault(); S.authPending ? toast('Still checking your sign-in…') : showAuth('login'); } });
 $('#cardBody').addEventListener('change', e => { const f = e.target.closest('.alertform'); if (f) refreshQuote(f); });
 $('#cardBody').addEventListener('input', e => { const f = e.target.closest('.alertform'); if (f && (e.target.name === 'percent' || e.target.name === 'target')) { clearTimeout(f._t); f._t = setTimeout(() => refreshQuote(f), 250); } });
 $('#cardBody').addEventListener('submit', async e => {
@@ -430,7 +432,7 @@ function showAuth(mode) {
   openModal('#authModal');
 }
 document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) showAuth(b.dataset.t); });
-$('#authBtn').addEventListener('click', () => S.user ? openAlerts() : showAuth('login'));
+$('#authBtn').addEventListener('click', () => S.user ? openAlerts() : S.authPending ? toast('Still checking your sign-in — the server may be waking up') : showAuth('login'));
 $('#authForm').addEventListener('submit', async e => {
   e.preventDefault(); const f = e.target;
   const body = { username: f.username.value, password: f.password.value };
@@ -439,8 +441,9 @@ $('#authForm').addEventListener('submit', async e => {
   catch (err) { $('#authErr').textContent = err.message; }
 });
 function setUser(u) {
-  S.user = u;
+  S.user = u; S.authPending = false;
   $('#authBtn').textContent = u ? `👤 ${u.username}` : 'Log in';
+  if (!$('#cardModal').hidden && $('#cardBody [data-authgate]') && S.reopen) S.reopen(); // re-render the alert form now that we know
   showPwBanner(u);
   $('#alertsBtn').hidden = !u;
   renderChips(); updateFav(); if (u) loadAlerts();
@@ -619,6 +622,7 @@ function renderSealedGrid() {
 }
 $('#sGrid').addEventListener('click', e => { const a = e.target.closest('[data-sid]'); if (a) openSealed(SS.items.find(x => x.id === +a.dataset.sid)); });
 function openSealed(x) {
+  S.reopen = () => openSealed(x);
   miniCharts.forEach(ch => ch.destroy()); miniCharts = [];
   const hist = (x.history || []).filter(h => h.points.length); const days = new Set(hist.flatMap(h => h.points.map(p => p.d)));
   const sx = { ...x, source: 'tcgcsv' };
@@ -641,14 +645,38 @@ function openSealed(x) {
 // ---------- boot ----------
 (async () => {
   loadStatus();
-  const [pk, me] = await Promise.all([api('/api/pokemon').catch(() => []), api('/api/me').catch(() => ({ user: null }))]);
-  S.pokemon = pk; setUser(me.user); renderChips();
+  checkSession(); // independent of the Pokémon list; never treated as "signed out" on errors
+  S.pokemon = await apiRetry('/api/pokemon').catch(() => []); renderChips();
   const params = new URLSearchParams(location.search);
   const l = params.get('lang'); if (l) { const b = $(`#langs [data-l="${l}"]`); if (b) b.click(); }
   const n = params.get('pokemon'); if (n) await choose(S.pokemon.find(p => p.name.toLowerCase() === n.toLowerCase()));
   if (location.hash === '#sealed') setMode('sealed');
   else if (location.hash === '#find') setMode('find');
 })();
+
+// Session check on load. A cold start (Render wake + database wake) can take 30-60 s and may return 502/503 or time out:
+// keep retrying and keep showing "signing in" — only a definite answer from /api/me decides signed in vs. signed out.
+async function apiRetry(path, { tries = 8, timeout = 25e3 } = {}) {
+  let wait = 1500;
+  for (let i = 1; ; i++) {
+    const ac = new AbortController(), t = setTimeout(() => ac.abort(), timeout);
+    try { return await api(path, { signal: ac.signal }); }
+    catch (e) { if (i >= tries || (e.status && e.status < 500 && e.status !== 429)) throw e; }
+    finally { clearTimeout(t); }
+    await new Promise(r => setTimeout(r, wait)); wait = Math.min(wait * 1.6, 8000);
+  }
+}
+async function checkSession() {
+  S.authPending = true; $('#authBtn').textContent = 'Signing in…';
+  try {
+    const me = await apiRetry('/api/me');
+    setUser(me.user);
+    if (me.sessionExpired) toast('Your previous sign-in is no longer valid — please log in (or sign up again) once.');
+  } catch {
+    $('#authBtn').textContent = 'Retry sign-in'; // keep the cookie and S.user untouched; try again in the background
+    setTimeout(checkSession, 15e3);
+  }
+}
 
 // Accounts recreated from a signed sign-in cookie have no password on record: let the owner set one.
 function showPwBanner(u) {

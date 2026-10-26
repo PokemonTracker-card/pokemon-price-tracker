@@ -831,8 +831,11 @@ const SESSION_TTL = 365 * 864e5, SESSION_REFRESH = 864e5;
 const SESSION_SECRET = (() => {
   const s = process.env.SESSION_SECRET;
   if (s && s.length >= 32) return Buffer.from(s);
-  log('WARNING: SESSION_SECRET is not set (or too short) - using a random per-process key; sign-ins will not survive a restart.');
-  return crypto.randomBytes(48);
+  if (PROD) { log('FATAL: SESSION_SECRET is not set (or shorter than 32 chars). Refusing to start: a random key would sign everyone out on every restart.'); process.exit(1); }
+  const cfg = loadConfig(); // dev: a random key persisted in the local config file, so restarts keep sessions too
+  if (!cfg.sessionSecret) { cfg.sessionSecret = crypto.randomBytes(48).toString('base64url'); L.writeJSON(CONFIG_FILE, cfg, true); }
+  log('SESSION_SECRET not set - using the persisted development key from the local config file');
+  return Buffer.from(cfg.sessionSecret);
 })();
 const b64u = b => Buffer.from(b).toString('base64url');
 const sign = data => crypto.createHmac('sha256', SESSION_SECRET).update(data).digest();
@@ -849,11 +852,14 @@ function readToken(t) {
   try { const c = JSON.parse(Buffer.from(body, 'base64url').toString()); return c && c.u && c.exp > Date.now() ? c : null; } catch { return null; }
 }
 async function currentUser(req, res) {
-  const c = readToken(cookies(req).sid); if (!c) return null;
-  let u = db.users[c.u];
+  const raw = cookies(req).sid; if (!raw) return null;
+  const c = readToken(raw); if (!c) { req.staleSession = true; return null; } // bad signature (pre-Oct-26 cookie format / old key) or expired
+  c.u = String(c.u).toLowerCase();
+  let u = db.users[c.u] || (db.users[c.u] = await store.get('users', c.u).catch(() => null) || undefined);
+  if (!u) delete db.users[c.u];
   if (u) {
     if (!u.uid) { u.uid = c.id; await saveUser(u); } // accounts created before uids existed adopt the first valid token's uid
-    if (u.uid !== c.id || (u.sv || 0) !== (c.v || 0)) return null; // different account with the same name, or logged out
+    if (u.uid !== c.id || (u.sv || 0) !== (c.v || 0)) { req.staleSession = true; return null; } // different account with the same name, or logged out
   } else {
     // Record missing (store wiped): recreate a minimal profile from the signed claims so the person stays signed in.
     u = db.users[c.u] = { username: c.u, uid: c.id, sv: c.v || 0, pass: null, email: c.e || '', favorites: [], createdAt: new Date(c.iat).toISOString(), restoredFromSession: new Date().toISOString() };
@@ -864,7 +870,8 @@ async function currentUser(req, res) {
 }
 function sessionCookie(req, token, maxAge) {
   const secure = PROD || req.headers['x-forwarded-proto'] === 'https' || /trycloudflare|https/.test(req.headers['cf-visitor'] || '') ? '; Secure' : '';
-  return `sid=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(maxAge)}${secure}`;
+  const expires = new Date(maxAge > 0 ? Date.now() + maxAge * 1000 : 0).toUTCString();
+  return `sid=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(maxAge)}; Expires=${expires}${secure}`;
 }
 const publicUser = u => u && ({ username: u.username, email: u.email || '', favorites: u.favorites || [], restored: !u.pass });
 const attempts = new Map(), adminFails = new Map();
@@ -887,7 +894,10 @@ const server = http.createServer(async (req, res) => {
     if (p.startsWith('/api/')) {
       if (req.method === 'POST' && req.headers['content-type'] && !req.headers['content-type'].includes('application/json')) return send(res, 415, { error: 'JSON only' });
       const ip = clientIp(req);
-      if (!state.storeReady && p !== '/api/status') return send(res, 503, { error: 'Starting up, try again in a few seconds' }, 'application/json', { 'Retry-After': '5' });
+      if (!state.storeReady && p !== '/api/status') { // cold start: hold the request while the database wakes up rather than answering "signed out"
+        await Promise.race([storeReadyP, new Promise(r => setTimeout(r, 45e3))]);
+        if (!state.storeReady) return send(res, 503, { error: 'Starting up, try again in a few seconds' }, 'application/json', { 'Retry-After': '5' });
+      }
       const user = await currentUser(req, res);
 
       // --- token-protected alert check for an external daily job (same logic as check_alerts.js) ---
@@ -984,8 +994,10 @@ const server = http.createServer(async (req, res) => {
       if (p === '/api/login' && req.method === 'POST') {
         if (rateLimited(ip)) return send(res, 429, { error: 'Too many attempts, try again later' });
         const b = await readBody(req);
-        const usr = db.users[String(b.username || '').trim().toLowerCase()];
-        if (!usr || !usr.pass || !(await L.verifyPassword(String(b.password || ''), usr.pass))) return send(res, 401, { error: 'Wrong username or password' });
+        const uname = String(b.username || '').trim().toLowerCase();
+        const usr = db.users[uname] || (db.users[uname] = await store.get('users', uname).catch(() => null) || undefined);
+        if (!usr) { delete db.users[uname]; return send(res, 401, { error: 'No account with that username. Accounts created before Oct 26 were lost in a server reset - please sign up again (same username is fine).' }); }
+        if (!usr.pass || !(await L.verifyPassword(String(b.password || ''), usr.pass))) return send(res, 401, { error: 'Wrong username or password' });
         const token = await newSession(usr.username);
         return send(res, 200, { user: publicUser(usr) }, 'application/json', { 'Set-Cookie': sessionCookie(req, token, SESSION_TTL / 1000) });
       }
@@ -994,7 +1006,7 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true }, 'application/json', { 'Set-Cookie': sessionCookie(req, '', 0) });
       }
       if (p === '/api/me') {
-        if (!user) return send(res, req.method === 'GET' ? 200 : 401, { user: null });
+        if (!user) return send(res, req.method === 'GET' ? 200 : 401, { user: null, ...(req.staleSession ? { sessionExpired: true } : {}) }, 'application/json', req.staleSession ? { 'Set-Cookie': sessionCookie(req, '', 0) } : {});
         if (req.method === 'POST') {
           const b = await readBody(req);
           if (b.email !== undefined) { if (!validEmail(b.email)) return send(res, 400, { error: 'That email address looks invalid' }); user.email = String(b.email).trim(); }
@@ -1004,6 +1016,7 @@ const server = http.createServer(async (req, res) => {
             user.pass = await L.hashPassword(String(b.password)); delete user.restoredFromSession;
           }
           await saveUser(user);
+          return send(res, 200, { user: publicUser(user) }, 'application/json', { 'Set-Cookie': sessionCookie(req, makeToken(user), SESSION_TTL / 1000) });
         }
         return send(res, 200, { user: publicUser(user) });
       }
@@ -1109,6 +1122,7 @@ const server = http.createServer(async (req, res) => {
     fs.readFile(f, (err, buf) => err ? send(res, 404, 'Not found', 'text/plain') : send(res, 200, buf, MIME[path.extname(f)] || 'application/octet-stream'));
   } catch (e) { log('error', p, e.stack || e.message); if (!res.headersSent) send(res, 500, { error: PROD ? 'Server error' : e.message }); }
 });
+let storeReadyResolve; const storeReadyP = new Promise(r => { storeReadyResolve = r; });
 server.listen(PORT, '0.0.0.0', () => log(`Listening on port ${PORT} (${PROD ? 'production' : 'development'}, ${store.kind} storage)`));
 
 // Startup: storage -> accounts -> Pokémon list -> saved price index (fast) -> rebuild in background only if TCGCSV has newer prices.
@@ -1116,7 +1130,7 @@ server.listen(PORT, '0.0.0.0', () => log(`Listening on port ${PORT} (${PROD ? 'p
   const t0 = Date.now();
   await store.init();
   await loadAccounts();
-  state.storeReady = true;
+  state.storeReady = true; storeReadyResolve();
   await loadPokemon().catch(e => log('PokeAPI failed', e.message));
   const snap = await store.getBlob('index:latest').catch(e => { log('saved index read failed', e.message); return null; });
   if ((snap?.v === 1 || snap?.v === INDEX_V) && snap.cards?.length) { applyIndex(snap); state.indexSource = 'saved'; log(`Loaded saved index (prices ${snap.stamp}) in ${Date.now() - t0}ms`); }
