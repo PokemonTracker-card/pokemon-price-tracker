@@ -37,13 +37,33 @@ class JsonStore {
   async close() {}
 }
 
+// Turn a libpq-style URL (e.g. Neon's "...?sslmode=require&channel_binding=require") into node-postgres options.
+// node-postgres ignores channel_binding in the URL and treats sslmode=require as verify-full with a warning, so both are
+// stripped from the string and expressed as explicit options instead.
+function pgOptions(url) {
+  const u = new URL(url);
+  const sslmode = u.searchParams.get('sslmode'), cb = u.searchParams.get('channel_binding');
+  for (const k of ['sslmode', 'channel_binding', 'uselibpqcompat']) u.searchParams.delete(k);
+  const local = /^(localhost|127\.0\.0\.1|::1)$/.test(u.hostname);
+  return {
+    connectionString: u.toString(),
+    ssl: sslmode === 'disable' || (local && !sslmode) ? false : { rejectUnauthorized: true, servername: u.hostname },
+    enableChannelBinding: cb === 'require' || cb === 'prefer', // SCRAM-SHA-256-PLUS (supported by pg >= 8.15)
+  };
+}
+
 class PgStore {
   constructor(url) {
     this.kind = 'postgres';
-    const { Pool } = require('pg');
+    // PG_DRIVER=neon-ws: Neon's WebSocket driver over port 443 (for networks that block 5432; optional dev dependency).
+    const ws = process.env.PG_DRIVER === 'neon-ws';
+    let Pool;
+    if (ws) { const n = require(process.env.NEON_DRIVER_PATH || '@neondatabase/serverless'); n.neonConfig.webSocketConstructor = require(process.env.WS_PATH || 'ws'); Pool = n.Pool; this.kind = 'postgres (neon-ws)'; }
+    else ({ Pool } = require('pg'));
+    const opt = pgOptions(url);
+    if (ws) { delete opt.enableChannelBinding; delete opt.ssl; }
     // Short idle timeout so a scale-to-zero database (Neon) can suspend between bursts of activity.
-    this.pool = new Pool({ connectionString: url, max: 4, idleTimeoutMillis: 10000, connectionTimeoutMillis: 20000,
-      ssl: /localhost|127\.0\.0\.1/.test(url) || /sslmode=disable/.test(url) ? false : { rejectUnauthorized: true } });
+    this.pool = new Pool({ ...opt, max: 4, idleTimeoutMillis: 10000, connectionTimeoutMillis: 20000 });
     this.pool.on('error', e => console.error('pg pool error', e.message));
   }
   q(text, params) { return this.pool.query(text, params); }
@@ -53,6 +73,8 @@ class PgStore {
       try {
         await this.q(`CREATE TABLE IF NOT EXISTS records (ns text NOT NULL, key text NOT NULL, value jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (ns, key))`);
         await this.q(`CREATE TABLE IF NOT EXISTS blobs (name text PRIMARY KEY, data bytea NOT NULL, bytes integer NOT NULL, updated_at timestamptz NOT NULL DEFAULT now())`);
+        const r = await this.q(`SELECT current_setting('server_version') AS v, (SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()) AS ssl`).catch(() => ({ rows: [{}] }));
+        console.log(`postgres store ready (server ${r.rows[0].v || '?'}, ssl ${r.rows[0].ssl ?? 'n/a'}, channel binding ${this.pool.options?.enableChannelBinding ? 'requested' : 'off'})`);
         return;
       } catch (e) { err = e; await L.sleep(2000 * (i + 1)); }
     }
@@ -74,4 +96,4 @@ class PgStore {
 }
 
 function createStore() { return process.env.DATABASE_URL ? new PgStore(process.env.DATABASE_URL) : new JsonStore(); }
-module.exports = { createStore };
+module.exports = { createStore, pgOptions };

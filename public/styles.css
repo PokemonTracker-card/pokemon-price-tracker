@@ -157,3 +157,6 @@ table.gt td:first-child{white-space:nowrap}
 .est{font-size:10.5px;color:#fbbf24;border:1px dashed #b45309;border-radius:4px;padding:0 4px;margin-left:4px}
 .est.bad{color:#f87171;border-color:#b91c1c}
 .reported{margin-top:12px;padding:10px;border:1px solid #6d28d9;border-radius:10px;background:rgba(109,40,217,.08)}
+
+.pwbanner{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;justify-content:center;padding:.6rem 1rem;background:#3a2f0b;border-bottom:1px solid #a68a1f;color:#ffe9a8;font-size:.9rem}
+.pwbanner input{flex:0 1 16rem;padding:.4rem .6rem;border-radius:6px;border:1px solid #6b5a1a;background:#1d1a10;color:#fff;min-width:14rem}

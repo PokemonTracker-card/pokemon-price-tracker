@@ -998,6 +998,11 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'POST') {
           const b = await readBody(req);
           if (b.email !== undefined) { if (!validEmail(b.email)) return send(res, 400, { error: 'That email address looks invalid' }); user.email = String(b.email).trim(); }
+          if (b.password !== undefined) { // only for accounts restored from a session cookie (no password on record)
+            if (user.pass) return send(res, 400, { error: 'This account already has a password' });
+            if (String(b.password).length < 8) return send(res, 400, { error: 'Password must be at least 8 characters' });
+            user.pass = await L.hashPassword(String(b.password)); delete user.restoredFromSession;
+          }
           await saveUser(user);
         }
         return send(res, 200, { user: publicUser(user) });

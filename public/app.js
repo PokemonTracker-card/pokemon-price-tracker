@@ -441,7 +441,7 @@ $('#authForm').addEventListener('submit', async e => {
 function setUser(u) {
   S.user = u;
   $('#authBtn').textContent = u ? `👤 ${u.username}` : 'Log in';
-  if (u?.restored && !setUser.warned) { setUser.warned = true; setTimeout(() => toast('Your account was restored from your sign-in — set a password again via Sign up (same username) so you can log in on other devices.'), 800); }
+  showPwBanner(u);
   $('#alertsBtn').hidden = !u;
   renderChips(); updateFav(); if (u) loadAlerts();
 }
@@ -649,3 +649,20 @@ function openSealed(x) {
   if (location.hash === '#sealed') setMode('sealed');
   else if (location.hash === '#find') setMode('find');
 })();
+
+// Accounts recreated from a signed sign-in cookie have no password on record: let the owner set one.
+function showPwBanner(u) {
+  let b = document.getElementById('pwBanner');
+  if (!u?.restored) { if (b) b.remove(); return; }
+  if (b) return;
+  b = document.createElement('form'); b.id = 'pwBanner'; b.className = 'pwbanner';
+  b.innerHTML = `<span>Your account <b>${esc(u.username)}</b> was restored from your sign-in, but it has no password yet. Set one so you can log in on other devices:</span>
+    <input type="password" name="pw" minlength="8" autocomplete="new-password" placeholder="New password (8+ characters)" required>
+    <button class="btn primary" type="submit">Set password</button>`;
+  b.addEventListener('submit', async e => {
+    e.preventDefault();
+    try { const r = await api('/api/me', { method: 'POST', body: JSON.stringify({ password: b.pw.value }) }); toast('Password set'); setUser(r.user); }
+    catch (err) { toast(err.message); }
+  });
+  document.body.prepend(b);
+}
